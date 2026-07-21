@@ -201,32 +201,7 @@ sudo infra-node deploy \
 
 ## 防火墙
 
-防火墙默认不自动启用。启用后只管理 `table inet infra_node_filter`，自动保留实际 SSH 监听端口，并在应用前设置五分钟自动回滚。
-
-### 查看状态和规则
-
-```bash
-sudo infra-node firewall show       # 查看 Infra-node 防火墙状态；status 是等价别名
-sudo infra-node firewall status     # 与上一条等价，兼容部分较早的离线修复包
-```
-
-只有防火墙已经启用并创建了自有表时，下面的原生 nftables 命令才会成功：
-
-```bash
-sudo nft list table inet infra_node_filter # 直接查看 Infra-node 自有 nftables 表
-```
-
-如果输出 `No such file or directory`，表示 `inet infra_node_filter` 表尚未创建，即 Infra-node 防火墙当前未启用，并不是 nftables 安装损坏。
-
-### 配置或更新
-
-```bash
-sudo infra-node firewall configure # 交互式选择 TCP/UDP 端口并启用或更新防火墙
-```
-
-当前仓库的 `configure` 与 `apply` 等价，`show` 与 `status` 等价。若已安装的旧离线修复包提示“未知 firewall 子命令”，请先确保仓库中的 `README.md` 与 `CHECKSUMS.sha256` 同步提交，再执行 `sudo infra-node self-update`。不要为绕过摘要错误而删除或跳过校验。
-
-### 禁用
+防火墙默认不自动启用。启用时只管理 `table inet infra_node_filter`，自动保留实际 SSH 监听端口，并在应用前设置 5 分钟自动回滚：
 
 ```bash
 sudo infra-node firewall disable # 仅删除 Infra-node 自有表、配置和服务，不清理其他防火墙规则
@@ -291,13 +266,12 @@ sudo infra-node firewall disable # 仅删除 Infra-node 自有表、配置和服
 ## 开发与许可证
 
 ```bash
-make checksums # 重新生成 CHECKSUMS.sha256；修改任何受校验文件后必须执行
-make check     # 运行语法检查、ShellCheck、Smoke Test 和摘要校验
-make dist      # 生成可发布的项目归档包
+make checksum
+make check
 ```
 
-`README.md` 也受完整性校验保护。修改 README 后，必须在同一个提交中更新 `CHECKSUMS.sha256`；否则 `self-update` 会按设计拒绝安装该提交。
+`make check` 会执行 Bash 语法检查、摘要验证、入口权限回归测试、事务提交边界、保守网络策略、防火墙渲染和代理部署边界检查。
 
-CI 执行 Bash 语法、ShellCheck、Smoke Test、摘要校验及 Debian / Ubuntu 容器矩阵。
+## 许可证
 
-本项目采用独立文件提供的 [MIT License](LICENSE)。
+MIT
