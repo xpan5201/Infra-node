@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+INFRA_ROOT="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd -P)"
+# shellcheck disable=SC1091
+source "$INFRA_ROOT/config/defaults.env"
+INFRA_VERSION="$(tr -d '\r\n' <"$INFRA_ROOT/VERSION")"
+for _lib in ui core platform packages transaction updater; do source "$INFRA_ROOT/lib/${_lib}.sh"; done
+for _module in assessment base network proxy firewall audit experience deploy; do source "$INFRA_ROOT/lib/modules/${_module}.sh"; done
+source "$INFRA_ROOT/lib/tui.sh"
+
+usage() {
+  cat <<'EOF_USAGE'
+Infra-node — 代理节点主机基础设施工具（不部署代理服务）
+
+用法:
+  infra-node [全局选项] <命令> [参数]
+
+全局选项:
+  --yes                自动确认安全提示
+  --non-interactive    禁止交互
+  --dry-run            显示部分系统操作但不执行
+  --no-color           禁用颜色
+
+命令:
+  deploy [选项]        部署基础设施
+  status               查看状态
+  check                运行诊断与审计
+  doctor               环境诊断
+  audit                安全审计
+  panel                交互面板
+  firewall enable      启用自有 nftables 表
+  firewall disable     删除自有 nftables 表
+  firewall status      查看自有 nftables 表
+  experience [URL]     按需 HTTPS 网络测试
+  backup list          列出事务备份
+  backup restore ID    恢复指定事务
+  self-update [REF] [完整 SHA]
+  version
+  help
+
+deploy 选项:
+  --profile auto|minimal|balanced|performance
+  --swap auto|yes|no
+  --security-updates yes|no
+  --proxy-units auto|unit1.service,unit2.service
+  --restart-proxy yes|no   默认 no
+
+firewall enable 选项:
+  --tcp 80,443         额外允许 TCP 端口；SSH 监听端口会自动保留
+  --udp 443            额外允许 UDP 端口
+EOF_USAGE
+}
+
+parse_global_options() {
+  REMAINING_ARGS=()
+  while (($#)); do
+    case "$1" in
+      --yes|-y) INFRA_ASSUME_YES=1 ;;
+      --non-interactive) INFRA_NON_INTERACTIVE=1 ;;
+      --dry-run) INFRA_DRY_RUN=1 ;;
+      --no-color) INFRA_NO_COLOR=1 ;;
+      --verbose) INFRA_VERBOSE=1 ;;
+      --) shift; REMAINING_ARGS+=("$@"); break ;;
+      *) REMAINING_ARGS+=("$1") ;;
+    esac
+    shift
+  done
+}
+
+cmd_deploy_parse() {
+  local profile=auto swap=auto updates=no units=auto restart=no
+  while (($#)); do
+    case "$1" in
+      --profile) [[ $# -ge 2 ]] || core_die '--profile 缺少值'; profile="$2"; shift 2 ;;
+      --swap) [[ $# -ge 2 ]] || core_die '--swap 缺少值'; swap="$2"; shift 2 ;;
+      --security-updates) [[ $# -ge 2 ]] || core_die '--security-updates 缺少值'; updates="$2"; shift 2 ;;
+      --proxy-units) [[ $# -ge 2 ]] || core_die '--proxy-units 缺少值'; units="$2"; shift 2 ;;
+      --restart-proxy) [[ $# -ge 2 ]] || core_die '--restart-proxy 缺少值'; restart="$2"; shift 2 ;;
+      *) core_die "deploy 未知参数：$1" ;;
+    esac
+  done
+  [[ $swap == auto || $swap == yes || $swap == no ]] || core_die '--swap 必须为 auto/yes/no'
+  [[ $updates == yes || $updates == no ]] || core_die '--security-updates 必须为 yes/no'
+  [[ $restart == yes || $restart == no ]] || core_die '--restart-proxy 必须为 yes/no'
+  deploy_run "$profile" "$swap" "$updates" "$units" "$restart"
+}
+
+cmd_firewall_parse() {
+  local action="${1:-status}" tcp='' udp=''; (($#)) && shift || true
+  case "$action" in
+    enable)
+      while (($#)); do
+        case "$1" in
+          --tcp) [[ $# -ge 2 ]] || core_die '--tcp 缺少值'; tcp="$2"; shift 2 ;;
+          --udp) [[ $# -ge 2 ]] || core_die '--udp 缺少值'; udp="$2"; shift 2 ;;
+          *) core_die "firewall enable 未知参数：$1" ;;
+        esac
+      done
+      core_require_root; core_acquire_lock; firewall_apply "$tcp" "$udp"; txn_commit; firewall_finalize
+      ;;
+    disable) core_acquire_lock; firewall_disable; txn_commit ;;
+    status) firewall_status ;;
+    *) core_die "未知 firewall 子命令：$action" ;;
+  esac
+}
+
+main() {
+  parse_global_options "$@"; set -- "${REMAINING_ARGS[@]}"
+  ui_detect; core_init "$@"
+  local command="${1:-panel}"; (($#)) && shift || true
+  case "$command" in
+    deploy) cmd_deploy_parse "$@" ;;
+    status) status_run ;;
+    check) doctor_run; audit_run ;;
+    doctor) doctor_run ;;
+    audit) audit_run ;;
+    panel) tui_panel ;;
+    firewall) cmd_firewall_parse "$@" ;;
+    experience) experience_run "${1:-$INFRA_TEST_URL}" ;;
+    backup)
+      case "${1:-list}" in
+        list) txn_list ;;
+        restore) [[ -n ${2:-} ]] || core_die 'backup restore 缺少事务 ID'; core_acquire_lock; txn_restore_id "$2" ;;
+        *) core_die '未知 backup 子命令' ;;
+      esac
+      ;;
+    self-update) cmd_self_update "${1:-}" "${2:-}" ;;
+    version|-V|--version) printf 'Infra-node %s\n' "$INFRA_VERSION" ;;
+    help|-h|--help) usage ;;
+    *) usage >&2; core_die "未知命令：$command" ;;
+  esac
+}
+
+main "$@"

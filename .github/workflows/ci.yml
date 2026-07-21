@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    strategy:
+      matrix:
+        image: [debian:13, ubuntu:24.04]
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: apt-get update && apt-get install -y --no-install-recommends bash coreutils findutils grep sed gawk util-linux procps iproute2 ca-certificates make shellcheck git tar
+      - name: Verify
+        run: make check
