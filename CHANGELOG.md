@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.6.2 maintenance hotfix - 2026-07-21
+
+> 维护修复，不修改 `VERSION`。
+
+### Fixed
+
+- 移除运行时 `CHECKSUMS.sha256` 门禁，普通文件增删不再导致安装或自更新被错误阻断。
+- 自更新不再因当前安装目录被修改而拒绝覆盖；即使目标 commit 相同，也会原子重装 staging 树。
+- 增加 `firewall configure|apply`、`firewall show|status` 和 `firewall disable|remove` 命令别名。
+- 防火墙未启用或 nftables 未安装时，`firewall show` 以正常状态返回，不再暴露底层 `No such file or directory`。
+- 防火墙端口参数支持去重、前导零规范化和 `10000-10100` 范围，并限制最多 128 项。
+- 防火墙确认后启用独立 systemd oneshot 持久化服务；禁用时仅删除自有表、配置、辅助脚本和自有服务。
+- 防火墙确认超时后拒绝继续持久化，避免自动回滚已经触发后又重新加载未确认规则。
+- 安装目标若被符号链接或普通文件占用时拒绝目录交换，防止固定安装路径被重定向。
+
+### Tests
+
+- 增加无摘要清单安装、同 commit 重装修复、firewall 命令帮助、范围端口和未启用状态回归。
+
 ## 1.6.2 - 2026-07-21
 
 ### Fixed

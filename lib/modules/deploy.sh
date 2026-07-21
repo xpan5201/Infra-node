@@ -11,7 +11,7 @@ EOF_STATE
 
 deploy_run() {
   local profile="${1:-auto}" swap="${2:-auto}" security_updates="${3:-no}" proxy_units="${4:-auto}" restart_proxy="${5:-no}"
-  core_require_root; core_acquire_lock; platform_detect_all; platform_require_free_space 160
+  core_require_root || return; core_acquire_lock || return; platform_detect_all || return; platform_require_free_space 160 || return
   assessment_choose_profile "$profile" >/dev/null
   assessment_show "$ASSESS_PROFILE"
   txn_begin 'full deployment'

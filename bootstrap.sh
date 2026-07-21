@@ -20,7 +20,6 @@ bootstrap_dependencies() {
   while read -r cmd package; do command -v "$cmd" >/dev/null 2>&1 || missing+=("$package"); done <<'EOF_DEPS'
 git git
 curl curl
-sha256sum coreutils
 find findutils
 flock util-linux
 setpriv util-linux
@@ -44,7 +43,7 @@ for _lib in ui core platform packages transaction updater; do source "$BOOTSTRAP
 ui_detect
 core_init "$@"
 ui_banner
-ui_section '仓库校验与原子安装'
+ui_section '仓库检查与原子安装'
 update_install_from_source "$BOOTSTRAP_ROOT" "$INFRA_REPO_URL" "$INFRA_REPO_REF"
 
 if ui_confirm '立即部署节点基础设施？' yes; then

@@ -35,7 +35,7 @@ proxy_limits_for_profile() {
 
 proxy_write_dropin() {
   local unit="$1" restart="${2:-no}" nofile tasks oom path values
-  core_safe_unit "$unit" || core_die "非法 systemd unit：$unit"
+  if ! core_safe_unit "$unit"; then core_die "非法 systemd unit：$unit"; return 1; fi
   read -r nofile tasks oom < <(proxy_limits_for_profile "${ASSESS_PROFILE:-balanced}")
   path="/etc/systemd/system/${unit}.d/50-infra-node.conf"
   txn_begin 'proxy resource limits'
@@ -54,14 +54,15 @@ EOF_DROPIN
 
 proxy_apply() {
   local units_csv="${1:-auto}" restart="${2:-no}" unit found=0
-  [[ $restart == yes || $restart == no ]] || core_die 'restart 参数必须为 yes/no'
+  local -a parsed_units=()
+  if [[ $restart != yes && $restart != no ]]; then core_die 'restart 参数必须为 yes/no'; return 1; fi
   if [[ $units_csv == auto ]]; then
     while IFS= read -r unit; do [[ -n $unit ]] || continue; found=1; core_run_step "适配 $unit" proxy_write_dropin "$unit" "$restart"; done < <(proxy_discover_units)
   else
-    IFS=',' read -r -a _proxy_units <<<"$units_csv"
-    for unit in "${_proxy_units[@]}"; do
+    IFS=',' read -r -a parsed_units <<<"$units_csv"
+    for unit in "${parsed_units[@]}"; do
       unit="${unit//[[:space:]]/}"; [[ -n $unit ]] || continue
-      proxy_unit_exists "$unit" || core_die "未找到 unit：$unit"
+      if ! proxy_unit_exists "$unit"; then core_die "未找到 unit：$unit"; return 1; fi
       found=1; core_run_step "适配 $unit" proxy_write_dropin "$unit" "$restart"
     done
   fi

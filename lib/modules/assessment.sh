@@ -31,6 +31,7 @@ assessment_choose_profile() {
     fi
   else
     core_die "未知配置档位：$requested"
+    return 1
   fi
   printf '%s\n' "$ASSESS_PROFILE"
 }

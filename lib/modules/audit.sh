@@ -28,7 +28,13 @@ audit_run() {
   AUDIT_WARNINGS=0; AUDIT_ERRORS=0
   ui_section 'Infra-node 审计'
   [[ -d $INFRA_INSTALL_DIR ]] && audit_ok '安装目录存在' || audit_error '安装目录不存在'
-  [[ -r $INFRA_INSTALL_DIR/CHECKSUMS.sha256 ]] && (cd "$INFRA_INSTALL_DIR" && sha256sum --strict -c CHECKSUMS.sha256 >/dev/null 2>&1) && audit_ok '安装文件摘要一致' || audit_error '安装文件摘要缺失或不一致'
+  local required missing=0
+  for required in VERSION bin/infra-node bootstrap.sh proxy-vps-foundation.sh tests/smoke.sh config/defaults.env; do
+    if [[ -f $INFRA_INSTALL_DIR/$required && ! -L $INFRA_INSTALL_DIR/$required ]]; then :; else
+      audit_error "安装文件缺失或类型异常：$required"; missing=1
+    fi
+  done
+  ((missing == 1)) || audit_ok '安装目录结构完整'
   audit_file_mode "$INFRA_LOG_DIR/infra-node.log" 600
   audit_file_mode "$INFRA_ETC_DIR/firewall.nft" 600
   if [[ -r /etc/sysctl.d/99-infra-node.conf ]]; then
@@ -58,7 +64,7 @@ status_run() {
 doctor_run() {
   local rc=0
   ui_section '环境诊断'
-  for cmd in bash awk sed grep find sha256sum flock timeout; do command -v "$cmd" >/dev/null 2>&1 && audit_ok "命令可用：$cmd" || { audit_error "命令缺失：$cmd"; rc=1; }; done
+  for cmd in bash awk sed grep find flock timeout; do command -v "$cmd" >/dev/null 2>&1 && audit_ok "命令可用：$cmd" || { audit_error "命令缺失：$cmd"; rc=1; }; done
   platform_detect_all || rc=1
   [[ -w $INFRA_LOG_DIR || ${INFRA_TEST_MODE:-0} -eq 1 ]] && audit_ok '日志目录可写' || { audit_error '日志目录不可写'; rc=1; }
   [[ -r /proc/sys/net/ipv4/tcp_available_congestion_control ]] && audit_ok '可读取 TCP 拥塞控制能力' || audit_warn '无法读取 TCP 拥塞控制能力'

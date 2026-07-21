@@ -32,13 +32,26 @@ assert_not_contains() { ! grep -Eqi -- "$2" <<<"$1" || fail "$3"; }
 pass 'VERSION format'
 
 "$ROOT/bin/infra-node" version | grep -Fq "$INFRA_VERSION" || fail 'version command'
-"$ROOT/bin/infra-node" help | grep -Fq '不部署代理服务' || fail 'help boundary'
+help_text="$("$ROOT/bin/infra-node" help)"
+grep -Fq '不部署代理服务' <<<"$help_text" || fail 'help boundary'
+grep -Fq 'firewall configure' <<<"$help_text" || fail 'firewall configure missing from help'
+grep -Fq 'firewall show' <<<"$help_text" || fail 'firewall show missing from help'
 pass 'CLI version and help'
 
 update_tree_has_only_regular_entries "$ROOT"
 update_validate_symlinks "$ROOT"
-update_validate_checksum_manifest "$ROOT"
-pass 'checksum and tree validation'
+[[ ! -e $ROOT/CHECKSUMS.sha256 ]] || fail 'legacy checksum manifest still present'
+! grep -RqsE 'CHECKSUMS\.sha256|sha256sum --strict -c' "$ROOT/lib" "$ROOT/bin" "$ROOT/bootstrap.sh" || fail 'runtime checksum gate still referenced'
+pass 'structure checks without checksum manifest'
+
+mkdir -p "$TMP/bad-tree"
+printf 'ok\n' >"$TMP/bad-tree/regular"
+mkfifo "$TMP/bad-tree/unsupported"
+if update_tree_has_only_regular_entries "$TMP/bad-tree" >/dev/null 2>&1; then fail 'unsupported file type was masked in conditional context'; fi
+rm -f "$TMP/bad-tree/unsupported"
+ln -s /etc/passwd "$TMP/bad-tree/escape"
+if update_validate_symlinks "$TMP/bad-tree" >/dev/null 2>&1; then fail 'escaping symlink was masked in conditional context'; fi
+pass 'repository preflight failures propagate in conditional context'
 
 mkdir -p "$TMP/modes/bin" "$TMP/modes/tests"
 for path in bin/infra-node bootstrap.sh proxy-vps-foundation.sh tests/smoke.sh; do
@@ -66,7 +79,21 @@ rules="$(firewall_render_rules)"
 assert_contains "$rules" 'table inet infra_node_filter' 'owned firewall table'
 assert_contains "$rules" 'tcp dport { 22, 443 } accept' 'firewall tcp ports'
 assert_contains "$rules" 'ct state established,related accept' 'firewall established state'
-pass 'firewall rendering'
+FIREWALL_TCP_PORTS=(); FIREWALL_UDP_PORTS=()
+firewall_parse_ports tcp '443,10000-10100,443'
+[[ ${FIREWALL_TCP_PORTS[*]} == '443 10000-10100' ]] || fail 'firewall range normalization or deduplication'
+if firewall_parse_ports udp '65536' >/dev/null 2>&1; then fail 'invalid firewall port accepted'; fi
+if firewall_parse_ports udp '999999999999999999999999' >/dev/null 2>&1; then fail 'oversized firewall port accepted'; fi
+show_output="$(PATH=/nonexistent firewall_show 2>&1)" || fail 'firewall show should be non-fatal when nft is absent'
+assert_contains "$show_output" '未启用' 'firewall show missing disabled message'
+helper_text="$(firewall_render_helper /usr/sbin/nft)"
+unit_text="$(firewall_render_unit)"
+assert_contains "$helper_text" 'delete table inet infra_node_filter' 'firewall persistence helper does not replace only the owned table'
+assert_contains "$helper_text" '"$NFT" -c -f' 'firewall persistence helper missing syntax preflight'
+assert_contains "$unit_text" 'RemainAfterExit=yes' 'firewall persistence unit is not stateful'
+assert_contains "$unit_text" 'ConditionPathExists=/etc/infra-node/firewall.nft' 'firewall persistence unit missing config guard'
+assert_contains "$unit_text" 'Before=network-pre.target' 'firewall persistence unit starts too late'
+pass 'firewall parsing, rendering, persistence and friendly show'
 
 sample="$TMP/sample.conf"; printf 'before\n' >"$sample"
 txn_begin smoke-rollback; txn_write_file "$sample" 0600 <<<'after'; txn_rollback
@@ -74,6 +101,26 @@ grep -Fxq before "$sample" || fail 'transaction rollback'
 TXN_OUTCOME=none; TXN_PATHS=(); txn_begin smoke-commit; txn_write_file "$sample" 0600 <<<'committed'; txn_commit; txn_rollback
 grep -Fxq committed "$sample" || fail 'committed transaction must not rollback'
 pass 'transaction rollback and commit boundary'
+
+restore_file="$TMP/restore.conf"
+printf 'original\n' >"$restore_file"
+TXN_OUTCOME=none; TXN_PATHS=(); txn_begin restore-source; source_txn="$TXN_ID"
+txn_write_file "$restore_file" 0600 <<<'changed'
+txn_commit
+[[ $(cat "$restore_file") == changed ]] || fail 'restore fixture write'
+TXN_OUTCOME=none; TXN_PATHS=(); txn_restore_id "$source_txn" >/dev/null
+[[ $(cat "$restore_file") == original ]] || fail 'transaction restore did not restore original'
+[[ $TXN_ID != "$source_txn" && $TXN_OUTCOME == committed ]] || fail 'restore did not create a reversible transaction'
+
+bad_txn="${source_txn}-bad"
+cp -a "$INFRA_BACKUP_DIR/transactions/$source_txn" "$INFRA_BACKUP_DIR/transactions/$bad_txn"
+bad_key="$(find "$INFRA_BACKUP_DIR/transactions/$bad_txn/files" -name '*.path.b64' -printf '%f\n' | sed 's/\.path\.b64$//' | head -n1)"
+rm -f "$INFRA_BACKUP_DIR/transactions/$bad_txn/files/$bad_key.data"
+printf 'must-stay\n' >"$restore_file"
+TXN_OUTCOME=none; TXN_PATHS=()
+if txn_restore_id "$bad_txn" >/dev/null 2>&1; then fail 'corrupt transaction restore succeeded'; fi
+[[ $(cat "$restore_file") == must-stay ]] || fail 'corrupt transaction deleted current target before validation'
+pass 'transaction restore prevalidation and reversibility'
 
 marker="$TMP/should-not-exist"
 if MARKER="$marker" ROOT="$ROOT" TESTBASE="$TMP/run-step" bash -c '

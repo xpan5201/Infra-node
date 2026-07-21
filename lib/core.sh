@@ -49,7 +49,12 @@ core_init() {
 }
 
 core_stage() { CORE_STAGE="$*"; core_log INFO "stage entered"; }
-core_require_root() { [[ ${INFRA_TEST_MODE:-0} -eq 1 || $(id -u) -eq 0 ]] || core_die '此操作需要 root 权限。'; }
+core_require_root() {
+  if [[ ${INFRA_TEST_MODE:-0} -ne 1 && $(id -u) -ne 0 ]]; then
+    core_die '此操作需要 root 权限。'
+    return 1
+  fi
+}
 core_register_tmp() { CORE_TMP_PATHS+=("$1"); }
 core_unregister_tmp() { local p="$1" out=() x; for x in "${CORE_TMP_PATHS[@]}"; do [[ $x == "$p" ]] || out+=("$x"); done; CORE_TMP_PATHS=("${out[@]}"); }
 core_register_failure_hook() { CORE_FAILURE_HOOKS+=("$1"); }
@@ -100,7 +105,12 @@ core_acquire_lock() {
   local lock="$INFRA_STATE_DIR/infra-node.lock"
   mkdir -p -- "$INFRA_STATE_DIR"
   exec {CORE_LOCK_FD}>"$lock"
-  flock -n "$CORE_LOCK_FD" || core_die '已有另一个 Infra-node 操作正在运行。'
+  if ! flock -n "$CORE_LOCK_FD"; then
+    eval "exec ${CORE_LOCK_FD}>&-" 2>/dev/null || true
+    CORE_LOCK_FD=''
+    core_die '已有另一个 Infra-node 操作正在运行。'
+    return 1
+  fi
 }
 core_release_lock() { if [[ -n ${CORE_LOCK_FD:-} ]]; then flock -u "$CORE_LOCK_FD" 2>/dev/null || true; eval "exec ${CORE_LOCK_FD}>&-" 2>/dev/null || true; CORE_LOCK_FD=''; fi; }
 
@@ -110,7 +120,7 @@ core_safe_repo_url() {
   [[ $url =~ ^https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+(\.git)?$ || $url =~ ^git@[A-Za-z0-9.-]+:[A-Za-z0-9._/-]+(\.git)?$ ]]
 }
 core_safe_unit() { [[ $1 =~ ^[A-Za-z0-9_.@-]+\.service$ ]]; }
-core_valid_port() { [[ $1 =~ ^[0-9]+$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
+core_valid_port() { [[ ${1:-} =~ ^[0-9]{1,5}$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
 
 core_atomic_write() {
   local path="$1" mode="$2" dir tmp

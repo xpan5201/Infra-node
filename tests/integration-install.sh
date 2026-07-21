@@ -43,6 +43,17 @@ update_install_from_source "$TMP/source" https://github.com/xpan5201/Infra-node.
 for path in bin/infra-node bootstrap.sh proxy-vps-foundation.sh tests/smoke.sh; do
   [[ -x $INFRA_INSTALL_DIR/$path ]] || { echo "entrypoint not normalized: $path" >&2; exit 1; }
 done
-(cd "$INFRA_INSTALL_DIR" && sha256sum --strict -c CHECKSUMS.sha256 >/dev/null)
+[[ ! -e $INFRA_INSTALL_DIR/CHECKSUMS.sha256 ]] || { echo 'legacy checksum manifest installed' >&2; exit 1; }
+for required in VERSION bin/infra-node bootstrap.sh proxy-vps-foundation.sh tests/smoke.sh config/defaults.env; do
+  [[ -f $INFRA_INSTALL_DIR/$required ]] || { echo "required file missing: $required" >&2; exit 1; }
+done
 "$INFRA_COMMAND_DIR/infra-node" version | grep -Fq "$INFRA_VERSION"
+
+# Reinstalling the same Git commit must refresh the tree instead of trusting stale
+# local files now that the static checksum gate has been removed.
+printf 'locally modified\n' >"$INFRA_INSTALL_DIR/README.md"
+core_release_lock
+update_install_from_source "$TMP/source" https://github.com/xpan5201/Infra-node.git main >/dev/null
+cmp -s "$TMP/source/README.md" "$INFRA_INSTALL_DIR/README.md" || { echo 'same-commit reinstall did not refresh modified tree' >&2; exit 1; }
+
 printf 'Integration install passed.\n'

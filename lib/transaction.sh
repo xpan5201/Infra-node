@@ -58,29 +58,42 @@ txn_remove() {
   rm -rf -- "$path"
 }
 
-txn_restore_entry() {
-  local source="$1" key="$2" path type mode target=''
+txn_validate_entry() {
+  local source="$1" key="$2" path type
   [[ -r $source/files/$key.meta && -r $source/files/$key.path.b64 ]] || return 1
   path="$(_txn_b64_read "$source/files/$key.path.b64")"
   type="$(_txn_meta_value "$source/files/$key.meta" TYPE)"
-  mode="$(_txn_meta_value "$source/files/$key.meta" MODE)"
   [[ -n $path && $path == /* ]] || return 1
+  case "$type" in
+    file) [[ -f $source/files/$key.data && ! -L $source/files/$key.data ]] ;;
+    directory) [[ -d $source/files/$key.data && ! -L $source/files/$key.data ]] ;;
+    symlink) [[ -r $source/files/$key.target.b64 ]] ;;
+    missing) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+txn_restore_entry() {
+  local source="$1" key="$2" path type mode target=''
+  txn_validate_entry "$source" "$key" || return 1
+  path="$(_txn_b64_read "$source/files/$key.path.b64")"
+  type="$(_txn_meta_value "$source/files/$key.meta" TYPE)"
+  mode="$(_txn_meta_value "$source/files/$key.meta" MODE)"
+  case "$type" in
+    symlink) target="$(_txn_b64_read "$source/files/$key.target.b64")" ;;
+  esac
   rm -rf -- "$path"
   case "$type" in
     file|directory)
-      [[ -e $source/files/$key.data ]] || return 1
       mkdir -p -- "$(dirname "$path")"
       cp -a -- "$source/files/$key.data" "$path"
       [[ -n $mode ]] && chmod "$mode" "$path"
       ;;
     symlink)
-      [[ -r $source/files/$key.target.b64 ]] || return 1
-      target="$(_txn_b64_read "$source/files/$key.target.b64")"
       mkdir -p -- "$(dirname "$path")"
       ln -s -- "$target" "$path"
       ;;
     missing) : ;;
-    *) return 1 ;;
   esac
 }
 
@@ -123,12 +136,29 @@ txn_list() {
 }
 
 txn_restore_id() {
-  local id="$1" source="$INFRA_BACKUP_DIR/transactions/$id" path_file key
-  [[ $id =~ ^[A-Za-z0-9._-]+$ ]] || core_die '事务 ID 无效。'
-  [[ -d $source/files ]] || core_die "事务不存在：$id"
-  core_require_root
+  local id="$1" source path_file key path
+  local -a keys=()
+  source="$INFRA_BACKUP_DIR/transactions/$id"
+  if [[ ! $id =~ ^[A-Za-z0-9._-]+$ ]]; then core_die '事务 ID 无效。'; return 1; fi
+  if [[ ! -d $source/files ]]; then core_die "事务不存在：$id"; return 1; fi
+  core_require_root || return
   while IFS= read -r -d '' path_file; do
     key="$(basename "$path_file" .path.b64)"
-    txn_restore_entry "$source" "$key" || core_die "事务条目恢复失败：$key"
+    if ! txn_validate_entry "$source" "$key"; then core_die "事务条目损坏：$key"; return 1; fi
+    keys+=("$key")
   done < <(find "$source/files" -maxdepth 1 -type f -name '*.path.b64' -print0 | sort -z)
+  ((${#keys[@]} > 0)) || { ui_warn '事务中没有可恢复的文件。'; return 0; }
+
+  # Snapshot the current state first, so a restore that fails midway can itself
+  # be rolled back by the normal transaction failure hook.
+  txn_begin "restore transaction $id"
+  for key in "${keys[@]}"; do
+    path="$(_txn_b64_read "$source/files/$key.path.b64")"
+    txn_snapshot "$path"
+  done
+  for key in "${keys[@]}"; do
+    if ! txn_restore_entry "$source" "$key"; then core_die "事务条目恢复失败：$key"; return 1; fi
+  done
+  txn_commit
+  ui_ok "事务 $id 已恢复；恢复前状态已保存为新事务。"
 }

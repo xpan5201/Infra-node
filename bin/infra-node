@@ -29,9 +29,11 @@ Infra-node — 代理节点主机基础设施工具（不部署代理服务）
   doctor               环境诊断
   audit                安全审计
   panel                交互面板
-  firewall enable      启用自有 nftables 表
-  firewall disable     删除自有 nftables 表
-  firewall status      查看自有 nftables 表
+  firewall configure  交互配置并启用/更新自有 nftables 表
+  firewall show       查看自有 nftables 表；未启用时友好提示
+  firewall disable    删除自有 nftables 表
+  firewall enable     configure 的兼容别名
+  firewall status     show 的兼容别名
   experience [URL]     按需 HTTPS 网络测试
   backup list          列出事务备份
   backup restore ID    恢复指定事务
@@ -46,9 +48,9 @@ deploy 选项:
   --proxy-units auto|unit1.service,unit2.service
   --restart-proxy yes|no   默认 no
 
-firewall enable 选项:
-  --tcp 80,443         额外允许 TCP 端口；SSH 监听端口会自动保留
-  --udp 443            额外允许 UDP 端口
+firewall configure/enable 选项:
+  --tcp 80,443         额外允许 TCP 端口或范围；SSH 监听端口自动保留
+  --udp 443,20000-20100
 EOF_USAGE
 }
 
@@ -72,36 +74,65 @@ cmd_deploy_parse() {
   local profile=auto swap=auto updates=no units=auto restart=no
   while (($#)); do
     case "$1" in
-      --profile) [[ $# -ge 2 ]] || core_die '--profile 缺少值'; profile="$2"; shift 2 ;;
-      --swap) [[ $# -ge 2 ]] || core_die '--swap 缺少值'; swap="$2"; shift 2 ;;
-      --security-updates) [[ $# -ge 2 ]] || core_die '--security-updates 缺少值'; updates="$2"; shift 2 ;;
-      --proxy-units) [[ $# -ge 2 ]] || core_die '--proxy-units 缺少值'; units="$2"; shift 2 ;;
-      --restart-proxy) [[ $# -ge 2 ]] || core_die '--restart-proxy 缺少值'; restart="$2"; shift 2 ;;
-      *) core_die "deploy 未知参数：$1" ;;
+      --profile) if [[ $# -lt 2 ]]; then core_die '--profile 缺少值'; return 1; fi; profile="$2"; shift 2 ;;
+      --swap) if [[ $# -lt 2 ]]; then core_die '--swap 缺少值'; return 1; fi; swap="$2"; shift 2 ;;
+      --security-updates) if [[ $# -lt 2 ]]; then core_die '--security-updates 缺少值'; return 1; fi; updates="$2"; shift 2 ;;
+      --proxy-units) if [[ $# -lt 2 ]]; then core_die '--proxy-units 缺少值'; return 1; fi; units="$2"; shift 2 ;;
+      --restart-proxy) if [[ $# -lt 2 ]]; then core_die '--restart-proxy 缺少值'; return 1; fi; restart="$2"; shift 2 ;;
+      *) core_die "deploy 未知参数：$1"; return 1 ;;
     esac
   done
-  [[ $swap == auto || $swap == yes || $swap == no ]] || core_die '--swap 必须为 auto/yes/no'
-  [[ $updates == yes || $updates == no ]] || core_die '--security-updates 必须为 yes/no'
-  [[ $restart == yes || $restart == no ]] || core_die '--restart-proxy 必须为 yes/no'
+  if [[ $swap != auto && $swap != yes && $swap != no ]]; then core_die '--swap 必须为 auto/yes/no'; return 1; fi
+  if [[ $updates != yes && $updates != no ]]; then core_die '--security-updates 必须为 yes/no'; return 1; fi
+  if [[ $restart != yes && $restart != no ]]; then core_die '--restart-proxy 必须为 yes/no'; return 1; fi
   deploy_run "$profile" "$swap" "$updates" "$units" "$restart"
 }
 
-cmd_firewall_parse() {
-  local action="${1:-status}" tcp='' udp=''; (($#)) && shift || true
-  case "$action" in
-    enable)
-      while (($#)); do
-        case "$1" in
-          --tcp) [[ $# -ge 2 ]] || core_die '--tcp 缺少值'; tcp="$2"; shift 2 ;;
-          --udp) [[ $# -ge 2 ]] || core_die '--udp 缺少值'; udp="$2"; shift 2 ;;
-          *) core_die "firewall enable 未知参数：$1" ;;
+cmd_firewall_configure_parse() {
+  local explicit="${1:-0}" tcp='' udp='' positional=0
+  shift || true
+  while (($#)); do
+    case "$1" in
+      --tcp) if [[ $# -lt 2 ]]; then core_die '--tcp 缺少值'; return 1; fi; tcp="$2"; explicit=1; shift 2 ;;
+      --udp) if [[ $# -lt 2 ]]; then core_die '--udp 缺少值'; return 1; fi; udp="$2"; explicit=1; shift 2 ;;
+      --) shift; break ;;
+      -*) core_die "未知防火墙参数：$1"; return 1 ;;
+      *)
+        positional=$((positional+1)); explicit=1
+        case "$positional" in
+          1) tcp="$1" ;;
+          2) udp="$1" ;;
+          *) core_die '防火墙位置参数最多为 TCP 和 UDP 两项。'; return 1 ;;
         esac
-      done
-      core_require_root; core_acquire_lock; firewall_apply "$tcp" "$udp"; txn_commit; firewall_finalize
+        shift
+        ;;
+    esac
+  done
+  core_require_root || return
+  core_acquire_lock || return
+  firewall_configure "$tcp" "$udp" "$explicit" || return
+  txn_commit || return
+  firewall_finalize
+}
+
+cmd_firewall_parse() {
+  local action="${1:-show}"
+  (($#)) && shift || true
+  case "$action" in
+    configure|apply) cmd_firewall_configure_parse 0 "$@" ;;
+    enable) cmd_firewall_configure_parse 1 "$@" ;;
+    show|status)
+      if (($# != 0)); then core_die "firewall $action 不接受额外参数。"; return 1; fi
+      firewall_show
       ;;
-    disable) core_acquire_lock; firewall_disable; txn_commit ;;
-    status) firewall_status ;;
-    *) core_die "未知 firewall 子命令：$action" ;;
+    disable|remove)
+      if (($# != 0)); then core_die "firewall $action 不接受额外参数。"; return 1; fi
+      core_require_root || return; core_acquire_lock || return
+      firewall_disable || return
+      txn_commit || return
+      firewall_finalize
+      ;;
+    *) core_die '未知 firewall 子命令；可用：configure|show|disable。'; return 1 ;;
   esac
 }
 
@@ -121,14 +152,14 @@ main() {
     backup)
       case "${1:-list}" in
         list) txn_list ;;
-        restore) [[ -n ${2:-} ]] || core_die 'backup restore 缺少事务 ID'; core_acquire_lock; txn_restore_id "$2" ;;
-        *) core_die '未知 backup 子命令' ;;
+        restore) if [[ -z ${2:-} ]]; then core_die 'backup restore 缺少事务 ID'; return 1; fi; core_acquire_lock || return; txn_restore_id "$2" ;;
+        *) core_die '未知 backup 子命令'; return 1 ;;
       esac
       ;;
     self-update) cmd_self_update "${1:-}" "${2:-}" ;;
     version|-V|--version) printf 'Infra-node %s\n' "$INFRA_VERSION" ;;
     help|-h|--help) usage ;;
-    *) usage >&2; core_die "未知命令：$command" ;;
+    *) usage >&2; core_die "未知命令：$command"; return 1 ;;
   esac
 }
 

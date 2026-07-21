@@ -76,6 +76,7 @@ network_apply_sysctl() {
   txn_write_file "$NETWORK_SYSCTL_PATH" 0644 < <(network_build_sysctl "${ASSESS_PROFILE:-balanced}")
   if ! network_apply_sysctl_runtime; then
     core_die '部分网络参数应用失败，已触发运行时与文件回滚。'
+    return 1
   fi
   # Keep the runtime snapshot registered until the enclosing transaction is
   # committed. A later proxy/base failure must restore both files and live sysctls.
@@ -96,7 +97,7 @@ network_rollback_swap() {
 
 network_configure_swap() {
   local policy="${1:-auto}" mem size_mb fstab=/etc/fstab
-  [[ $policy == auto || $policy == yes || $policy == no ]] || core_die "Swap 策略无效：$policy"
+  if [[ $policy != auto && $policy != yes && $policy != no ]]; then core_die "Swap 策略无效：$policy"; return 1; fi
   [[ $policy != no ]] || { ui_info '按配置跳过 Swap。'; return 0; }
   swapon --noheadings --show=NAME 2>/dev/null | grep -q . && { ui_info '系统已有活动 Swap，保持不变。'; return 0; }
   mem="$(platform_mem_mb)"
