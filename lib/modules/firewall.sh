@@ -28,14 +28,17 @@ firewall_detect_ssh_ports() {
   local port
   if command -v ss >/dev/null 2>&1; then
     while IFS= read -r port; do core_valid_port "$port" && firewall_add_port tcp "$port"; done < <(
-      ss -H -lntp 2>/dev/null | awk '$0 ~ /sshd/ {addr=$4; sub(/^.*:/,"",addr); gsub(/\[|\]/,"",addr); if(addr~/^[0-9]+$/) print addr}' | sort -un
+      { ss -H -lntp 2>/dev/null || true; } | awk '$0 ~ /sshd/ {addr=$4; sub(/^.*:/,"",addr); gsub(/\[|\]/,"",addr); if(addr~/^[0-9]+$/) print addr}' | sort -un
     )
   fi
   if ((${#FIREWALL_TCP_PORTS[@]}==0)) && command -v sshd >/dev/null 2>&1; then
-    while IFS= read -r port; do core_valid_port "$port" && firewall_add_port tcp "$port"; done < <(sshd -T 2>/dev/null | awk '$1=="port" && $2~/^[0-9]+$/ {print $2}')
+    while IFS= read -r port; do core_valid_port "$port" && firewall_add_port tcp "$port"; done < <({ sshd -T 2>/dev/null || true; } | awk '$1=="port" && $2~/^[0-9]+$/ {print $2}')
   fi
   if ((${#FIREWALL_TCP_PORTS[@]}==0)) && platform_has_systemd && systemctl list-unit-files ssh.socket >/dev/null 2>&1; then
-    while IFS= read -r port; do core_valid_port "$port" && firewall_add_port tcp "$port"; done < <(systemctl show ssh.socket -p Listen --value 2>/dev/null | grep -oE ':[0-9]+' | tr -d ':' | sort -un)
+    while IFS= read -r port; do core_valid_port "$port" && firewall_add_port tcp "$port"; done < <(
+      { systemctl show ssh.socket -p Listen --value 2>/dev/null || true; } \
+        | { grep -oE ':[0-9]+' || true; } | tr -d ':' | sort -un
+    )
   fi
   if ((${#FIREWALL_TCP_PORTS[@]}==0)) && [[ -r /etc/ssh/sshd_config ]]; then
     while IFS= read -r port; do core_valid_port "$port" && firewall_add_port tcp "$port"; done < <(awk 'tolower($1)=="port" && $2~/^[0-9]+$/ {print $2}' /etc/ssh/sshd_config)
@@ -43,8 +46,17 @@ firewall_detect_ssh_ports() {
   ((${#FIREWALL_TCP_PORTS[@]})) || firewall_add_port tcp 22
 }
 
-firewall_ufw_active() { command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi '^Status: active'; }
-firewall_firewalld_active() { command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state 2>/dev/null | grep -qx running; }
+firewall_ufw_active() {
+  command -v ufw >/dev/null 2>&1 || return 1
+  if ufw status 2>/dev/null | grep -qi '^Status: active'; then return 0; fi
+  return 1
+}
+
+firewall_firewalld_active() {
+  command -v firewall-cmd >/dev/null 2>&1 || return 1
+  if firewall-cmd --state 2>/dev/null | grep -qx running; then return 0; fi
+  return 1
+}
 
 firewall_external_input_chain_exists() {
   local rules
@@ -131,6 +143,7 @@ firewall_cancel_rollback() {
 }
 
 firewall_runtime_rollback() {
+  [[ ${TXN_OUTCOME:-none} != committed ]] || return 0
   [[ ${INFRA_TEST_MODE:-0} -eq 1 ]] && return 0
   [[ -x $FIREWALL_ROLLBACK_SCRIPT ]] && /bin/bash "$FIREWALL_ROLLBACK_SCRIPT" || true
   firewall_cancel_rollback

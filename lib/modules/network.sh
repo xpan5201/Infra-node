@@ -50,6 +50,7 @@ network_capture_runtime() {
 
 network_restore_runtime() {
   local key value
+  [[ ${TXN_OUTCOME:-none} != committed ]] || return 0
   [[ -r ${NETWORK_RUNTIME_SNAPSHOT:-} ]] || return 0
   while IFS='=' read -r key value; do
     [[ -n $key ]] || continue
@@ -80,9 +81,13 @@ network_apply_sysctl() {
   # committed. A later proxy/base failure must restore both files and live sysctls.
 }
 
-network_swap_is_active() { swapon --noheadings --show=NAME 2>/dev/null | grep -Fxq "$NETWORK_SWAP_PATH"; }
+network_swap_is_active() {
+  if swapon --noheadings --show=NAME 2>/dev/null | grep -Fxq "$NETWORK_SWAP_PATH"; then return 0; fi
+  return 1
+}
 
 network_rollback_swap() {
+  [[ ${TXN_OUTCOME:-none} != committed ]] || return 0
   (( NETWORK_SWAP_CREATED == 1 )) || return 0
   swapoff "$NETWORK_SWAP_PATH" >/dev/null 2>&1 || true
   rm -f -- "$NETWORK_SWAP_PATH"

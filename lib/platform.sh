@@ -24,10 +24,15 @@ platform_detect_all() {
 }
 
 platform_require_free_space() {
-  local required_mb="$1" available
-  available="$(df -Pm "${INFRA_INSTALL_DIR:-/opt}" 2>/dev/null | awk 'NR==2{print $4}' || true)"
-  [[ $available =~ ^[0-9]+$ ]] || return 0
-  (( available >= required_mb )) || core_die "可用磁盘空间不足：至少需要 ${required_mb} MiB。"
+  local required_mb="$1" available probe="${INFRA_INSTALL_DIR:-/opt/infra-node}"
+  [[ $required_mb =~ ^[0-9]+$ ]] || core_die '磁盘空间阈值无效。'
+  # 安装目录在首次运行时通常尚不存在。向上寻找最近的现有父目录，
+  # 否则 df 会失败并让关键的容量预检被静默跳过。
+  while [[ ! -e $probe && $probe != / ]]; do probe="$(dirname -- "$probe")"; done
+  [[ -e $probe ]] || probe=/
+  available="$(df -Pm -- "$probe" 2>/dev/null | awk 'NR==2{print $4}' || true)"
+  [[ $available =~ ^[0-9]+$ ]] || { ui_warn "无法读取 ${probe} 的可用空间，跳过容量预检。"; return 0; }
+  (( available >= required_mb )) || core_die "可用磁盘空间不足：至少需要 ${required_mb} MiB，当前约 ${available} MiB。"
 }
 
 platform_has_systemd() { [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; }

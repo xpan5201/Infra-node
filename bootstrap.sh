@@ -50,6 +50,9 @@ update_install_from_source "$BOOTSTRAP_ROOT" "$INFRA_REPO_URL" "$INFRA_REPO_REF"
 if ui_confirm '立即部署节点基础设施？' yes; then
   deploy_args=()
   ((INFRA_ASSUME_YES==0)) || deploy_args+=(--yes)
+  # 安装器与部署命令共用同一把锁。exec 不会触发 EXIT trap，且打开的
+  # flock 文件描述符会被新进程继承，因此必须在交接前显式释放。
+  core_release_lock
   exec "$INFRA_INSTALL_DIR/bin/infra-node" "${deploy_args[@]}" deploy
 else
   ui_info '安装完成。稍后运行：sudo infra-node deploy'

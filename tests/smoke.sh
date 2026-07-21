@@ -103,6 +103,85 @@ network_commit_runtime
 ! printf '%s\n' "${CORE_FAILURE_HOOKS[@]}" | grep -Fxq network_restore_runtime || fail 'network runtime hook remained after commit'
 pass 'network runtime rollback lifetime'
 
+# A late signal/error after the persistent transaction is committed must not
+# revert live sysctls, remove committed Swap, or restore an old firewall.
+TXN_OUTCOME=committed
+NETWORK_SWAP_CREATED=1
+swapoff() { touch "$TMP/swapoff-called"; }
+network_rollback_swap
+[[ ! -e $TMP/swapoff-called ]] || fail 'committed swap was rolled back'
+unset -f swapoff
+network_restore_runtime
+firewall_runtime_rollback
+TXN_OUTCOME=none
+NETWORK_SWAP_CREATED=0
+pass 'runtime hooks honor committed boundary'
+
+# Regression: bootstrap must release the installer lock before exec'ing deploy.
+grep -A8 -F "if ui_confirm '立即部署节点基础设施？' yes; then" "$ROOT/bootstrap.sh"   | grep -Fq 'core_release_lock' || fail 'bootstrap handoff does not release lock'
+LOCK_TEST_STATE="$TMP/lock-state"
+INFRA_STATE_DIR="$LOCK_TEST_STATE"
+core_acquire_lock
+core_release_lock
+(
+  CORE_LOCK_FD=''
+  core_acquire_lock
+  core_release_lock
+) || fail 'lock cannot be reacquired after handoff release'
+pass 'bootstrap lock handoff regression'
+
+# Regression: an absent proxy unit is an expected predicate miss, not an ERR trap.
+mkdir -p "$TMP/fake-bin" "$TMP/proxy-probe"
+cat >"$TMP/fake-bin/systemctl" <<'EOF_SYSTEMCTL'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-unit-files) exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF_SYSTEMCTL
+chmod 0755 "$TMP/fake-bin/systemctl"
+proxy_probe_output="$(PATH="$TMP/fake-bin:$PATH" ROOT="$ROOT" TESTBASE="$TMP/proxy-probe" bash -c '
+  set -Eeuo pipefail
+  source "$ROOT/config/defaults.env"
+  INFRA_LOG_DIR="$TESTBASE/log"
+  INFRA_STATE_DIR="$TESTBASE/state"
+  INFRA_BACKUP_DIR="$TESTBASE/backup"
+  source "$ROOT/lib/ui.sh"
+  source "$ROOT/lib/core.sh"
+  source "$ROOT/lib/platform.sh"
+  source "$ROOT/lib/transaction.sh"
+  source "$ROOT/lib/modules/proxy.sh"
+  platform_has_systemd() { return 0; }
+  ui_detect
+  core_init proxy-probe
+  proxy_apply auto no
+' 2>&1)" || fail 'proxy absent-unit probe returned failure'
+assert_contains "$proxy_probe_output" '未发现已安装的受支持代理服务' 'proxy absent-unit message missing'
+assert_not_contains "$proxy_probe_output" '操作失败|执行命令|grep -q' 'proxy absent unit triggered ERR trap'
+pass 'proxy absent-unit ERR-trap regression'
+
+# First install uses a non-existent target path; free-space preflight must probe
+# the nearest existing parent instead of silently skipping df.
+DF_PROBE_FILE="$TMP/df-probe"
+df() {
+  printf '%s\n' "${3:-}" >"$DF_PROBE_FILE"
+  printf '%s\n' 'Filesystem 1048576-blocks Used Available Capacity Mounted on' 'testfs 1000 1 999 1% /'
+}
+INFRA_INSTALL_DIR="$TMP/not-yet-created/deeper/infra-node"
+platform_require_free_space 1
+[[ $(cat "$DF_PROBE_FILE") == "$TMP" ]] || fail 'free-space preflight did not use existing parent'
+unset -f df
+pass 'first-install free-space preflight'
+
+# Permission auditing must compare permission bits, not decimal mode values.
+mode_file="$TMP/mode-test"
+printf 'x\n' >"$mode_file"
+chmod 0444 "$mode_file"
+AUDIT_WARNINGS=0
+audit_file_mode "$mode_file" 600 >/dev/null
+((AUDIT_WARNINGS == 1)) || fail 'audit accepted group/other-readable mode 0444 under max 0600'
+pass 'permission-bit audit'
+
 for file in "$ROOT"/bootstrap.sh "$ROOT"/proxy-vps-foundation.sh "$ROOT"/bin/infra-node "$ROOT"/lib/*.sh "$ROOT"/lib/modules/*.sh "$ROOT"/tests/smoke.sh; do bash -n "$file" || fail "bash syntax ${file#$ROOT/}"; done
 pass 'Bash syntax'
 

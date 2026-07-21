@@ -4,9 +4,11 @@ Infra-node 是用于代理节点 VPS 的**主机基础设施层**。它提前完
 
 > 项目不安装代理程序，不生成代理配置、证书、密钥或订阅，不修改 SSH 用户/密钥/认证方式，也不运行常驻测速、监控或自动更新代理任务。
 
-## v1.6.1 修复重点
+## v1.6.2 修复重点
 
-- 修复 GitHub 网页上传或 ZIP 解压后入口文件为 `0644` 时，安装器在 `update_verify_tree` 阶段立即退出的问题。
+- 修复安装器完成原子安装后直接 `exec` 部署时继承 flock 文件描述符，导致部署误报“已有另一个 Infra-node 操作正在运行”的问题。
+- 修复自动探测代理 unit 时，未找到服务的正常返回值在 process substitution 中触发 ERR trap，并打印 `grep` 崩溃信息的问题。
+- 保留 v1.6.1 对 GitHub 网页上传或 ZIP 解压后入口文件为 `0644` 的兼容修复。
 - 校验顺序改为：文件类型与链接边界 → 完整摘要 → Bash 语法 → 固定入口权限规范化 → 低权限 Smoke Test。
 - 每个失败子项都会输出明确原因；Smoke Test 失败时直接显示前 40 行输出并写入日志。
 - 保持原子目录交换、命令链接恢复、事务提交标记和失败隔离。
@@ -34,8 +36,8 @@ sudo bash bootstrap.sh
 从发行 ZIP：
 
 ```bash
-unzip Infra-node-v1.6.1-fixed.zip
-cd Infra-node-v1.6.1-fixed
+unzip Infra-node-v1.6.2-fixed.zip
+cd Infra-node-v1.6.2-fixed
 sudo bash bootstrap.sh
 ```
 

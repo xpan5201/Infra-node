@@ -8,10 +8,20 @@ audit_warn() { printf 'WARN  %s\n' "$*"; AUDIT_WARNINGS=$((AUDIT_WARNINGS+1)); }
 audit_error() { printf 'ERROR %s\n' "$*"; AUDIT_ERRORS=$((AUDIT_ERRORS+1)); }
 
 audit_file_mode() {
-  local file="$1" max="$2" mode
+  local file="$1" max="$2" mode mode_value max_value
   [[ -e $file ]] || return 0
-  mode="$(stat -c %a "$file" 2>/dev/null || echo 999)"
-  ((10#$mode <= 10#$max)) && audit_ok "$file 权限为 $mode" || audit_warn "$file 权限偏宽：$mode"
+  mode="$(stat -c %a "$file" 2>/dev/null || echo invalid)"
+  if [[ $mode =~ ^[0-7]{3,4}$ && $max =~ ^[0-7]{3,4}$ ]]; then
+    mode_value=$((8#$mode)); max_value=$((8#$max))
+    # 只允许 max 中已声明的权限位；不能用十进制大小比较 Unix mode。
+    if (( (mode_value & ~max_value) == 0 )); then
+      audit_ok "$file 权限为 $mode"
+    else
+      audit_warn "$file 权限偏宽：$mode"
+    fi
+  else
+    audit_warn "$file 权限无法解析：$mode"
+  fi
 }
 
 audit_run() {

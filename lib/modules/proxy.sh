@@ -5,13 +5,24 @@ PROXY_KNOWN_UNITS=(xray.service sing-box.service hysteria-server.service hysteri
 proxy_unit_exists() {
   local unit="$1"
   core_safe_unit "$unit" || return 1
-  systemctl list-unit-files "$unit" --no-legend 2>/dev/null | grep -q "^${unit}[[:space:]]"
+  # 这是一个正常的“存在性探测”，未找到 unit 必须安静返回 1。
+  # 将可能返回 1 的管道放进 if 条件，避免 inherit_errexit/ERR trap 在
+  # process substitution 中把“未找到”误报成整个部署失败。
+  if systemctl list-unit-files "$unit" --no-legend --no-pager 2>/dev/null \
+      | awk -v wanted="$unit" '$1 == wanted { found=1 } END { exit found ? 0 : 1 }'; then
+    return 0
+  fi
+  return 1
 }
 
 proxy_discover_units() {
   local unit
   platform_has_systemd || return 0
-  for unit in "${PROXY_KNOWN_UNITS[@]}"; do proxy_unit_exists "$unit" && printf '%s\n' "$unit"; done
+  for unit in "${PROXY_KNOWN_UNITS[@]}"; do
+    if proxy_unit_exists "$unit"; then
+      printf '%s\n' "$unit"
+    fi
+  done
 }
 
 proxy_limits_for_profile() {
