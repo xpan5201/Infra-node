@@ -8,8 +8,8 @@ Infra-node 是用于代理节点 VPS 的**主机基础设施层**。它提前完
 
 - **代理 systemd 资源限制的 drop-in 路径修正为 `<unit>.service.d/`。**
   systemd 从 **unit 全名**（含类型后缀）加 `.d` 读取 drop-in：`xray.service`
-  对应 `xray.service.d/`，不是 `xray.d/`。v1.6.3 曾把这条本来正确的路径改错
-  （见下），导致资源限制第二次静默失效；已在真实 systemd 257 上实测判定后改回。
+  对应 `xray.service.d/`，不是 `xray.d/`。v1.6.3 曾把这条本来正确的路径改错，
+  导致资源限制第二次静默失效；已在真实 systemd 257 上实测判定后改回。
 - **更新系统补完。** 新增 `self-check`（只读查新版本）、`self-rollback`
   （回滚到上一次自更新前的版本）、`self-update --apply`（更新后自动重新部署）；
   默认更新通道改为跟随**发行 tag**；并新增**配置漂移检测** —— 升级后如果没重新
