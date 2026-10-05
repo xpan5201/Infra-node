@@ -23,28 +23,6 @@ Infra-node 是用于代理节点 VPS 的**主机基础设施层**。它提前完
 - 修正 README 中与代码矛盾的网络参数清单（此前声明不写 `tcp_fastopen`、
   `ip_local_port_range`、大缓冲区，而代码三项都会写）。
 
-## v1.6.3 修复重点
-
-- **BBR 此前是静默失效的。** Debian / Ubuntu 的 `tcp_bbr` 是默认不加载的模块，
-  旧判据只 grep 可用算法列表，在全新主机上恒为假 —— 既不写 `fq` / `bbr`，
-  也不给任何提示，用户以为 BBR 已开启而实际仍在跑 cubic。现在先 `modprobe`、
-  重新判定，并写入 `/etc/modules-load.d/50-infra-node-bbr.conf` 让它在重启后依然生效。
-- **代理向网络调优补全**：UDP 缓冲（QUIC / Hysteria / TUIC）、`tcp_fastopen`、
-  `tcp_slow_start_after_idle`、`tcp_notsent_lowat`，以及仅在明显偏窄时拓宽临时端口范围。
-  详见下文的「网络调优」。
-- **`--dry-run` 现在真的只预演。** 此前它仍会写入 sysctl、journald 和代理 drop-in，
-  创建固定目录，并在小内存主机上创建 Swap 与写 `/etc/fstab`；现在所有写入路径都已拦截。
-- **内核缺少 IPv6 开关（`ipv6.disable=1`）时不再中止整个部署**，
-  改为按内核实际支持的开关过滤并提示被跳过的项。
-- **`backup restore` 增加固定路径白名单**，越界事务会在删除任何文件前整批中止。
-- **防火墙确认后不再被失败钩子撤销**；Swap 与 `/etc/fstab` 的改写统一由事务管理。
-- 打开 shellcheck 门禁（此前 `|| true` 吞掉全部结果），并收敛到零告警。
-- 保留 v1.6.1 对 GitHub 网页上传或 ZIP 解压后入口文件为 `0644` 的兼容修复。
-- 移除容易因 README 等普通文件增删而阻断安装/自更新的静态摘要清单。
-- 安装前仍检查必要文件、非常规文件、越界符号链接、Bash 语法、固定入口权限和低权限 Smoke Test。
-- 保持原子目录交换、命令链接恢复、事务提交标记和失败隔离。
-- 加强 Debian 13/Ubuntu 环境兼容、参数校验、固定目录边界和防火墙冲突检测。
-
 ## 支持范围
 
 - Debian / Ubuntu
