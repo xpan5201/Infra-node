@@ -15,8 +15,11 @@ Infra-node 是用于代理节点 VPS 的**主机基础设施层**。它提前完
   详见下文的「网络调优」。
 - **`--dry-run` 现在真的只预演。** 此前它仍会写入 sysctl、journald 和代理 drop-in，
   创建固定目录，并在小内存主机上创建 Swap 与写 `/etc/fstab`；现在所有写入路径都已拦截。
-- **代理 systemd 资源限制此前从未生效**：drop-in 被写到 `<unit>.service.d/`，
-  systemd 永不读取。现修正为 `<unit>.d/`。
+- **代理 systemd 资源限制的 drop-in 路径修正为 `<unit>.service.d/`。**
+  systemd 从 **unit 全名**（含类型后缀）加 `.d` 读取 drop-in，
+  `xray.service` 对应 `xray.service.d/`，不是 `xray.d/`。已在真实 systemd 257
+  上实测判定（放进 `xray.d/` 完全不生效，放进 `xray.service.d/` 才生效），
+  发行版自带的 `systemd-logind.service.d`、`rc-local.service.d` 也是同一形式。
 - **内核缺少 IPv6 开关（`ipv6.disable=1`）时不再中止整个部署**，
   改为按内核实际支持的开关过滤并提示被跳过的项。
 - **`backup restore` 增加固定路径白名单**，越界事务会在删除任何文件前整批中止。

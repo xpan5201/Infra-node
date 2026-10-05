@@ -9,6 +9,13 @@ NETWORK_FSTAB_PATH=/etc/fstab
 NETWORK_PROC_SYS=/proc/sys
 # Test seam: where the BBR module-load persistence file goes.
 NETWORK_MODULES_LOAD_DIR=/etc/modules-load.d
+# Where the conflict scan looks for other sysctl drop-ins, and the file that holds
+# the project's own settings (never reported as a conflict with itself).
+NETWORK_SYSCTL_DIR=/etc/sysctl.d
+NETWORK_SYSCTL_CONF=/etc/sysctl.conf
+# Free space left over after creating a swap file. A swap file that fills the disk
+# is worse than no swap at all.
+NETWORK_SWAP_SPACE_HEADROOM_MB=256
 # Keys this kernel has no knob for. Recorded in a FILE, not a variable: the
 # builder always runs inside a command substitution (a subshell), so neither an
 # array NOR the file-path variable could be assigned there and reach the caller.
@@ -182,6 +189,49 @@ EOF_SYSCTL
   } | network_filter_unsupported
 }
 
+# Keys this project intends to manage, one per line.
+network_managed_keys() {
+  network_build_sysctl "${1:-balanced}" | sed -n 's/^[[:space:]]*\([a-z0-9._]*\)[[:space:]]*=.*/\1/p'
+}
+
+# Other files setting keys we also manage. The firewall refuses to take over when
+# UFW, firewalld or a foreign nftables chain is already there; sysctl had no such
+# check, so two drop-ins could silently fight over the same knob with the winner
+# decided by filename order — not a decision anybody made on purpose.
+# Prints "<file>: <key>" lines.
+network_find_conflicts() {
+  local our_path="$1" our_keys="$2" file key line
+  local -a files=()
+  [[ -r $NETWORK_SYSCTL_CONF ]] && files+=("$NETWORK_SYSCTL_CONF")
+  if [[ -d $NETWORK_SYSCTL_DIR ]]; then
+    while IFS= read -r file; do files+=("$file"); done \
+      < <(find "$NETWORK_SYSCTL_DIR" -maxdepth 1 -type f -name '*.conf' 2>/dev/null | sort)
+  fi
+  for file in "${files[@]}"; do
+    [[ $file == "$our_path" ]] && continue
+    [[ -r $file ]] || continue
+    while IFS= read -r line; do
+      key="${line%%=*}"
+      [[ $key == *$'\n'* ]] && continue
+      key="${key#"${key%%[![:space:]]*}"}"
+      key="${key%"${key##*[![:space:]]}"}"
+      [[ -n $key && $key != \#* ]] || continue
+      if printf '%s\n' "$our_keys" | grep -Fxq -- "$key"; then
+        printf '%s: %s\n' "$file" "$key"
+      fi
+    done <"$file"
+  done
+}
+
+network_report_conflicts() {
+  local our_path="$1" profile="${2:-balanced}" conflicts
+  conflicts="$(network_find_conflicts "$our_path" "$(network_managed_keys "$profile")")"
+  [[ -n $conflicts ]] || return 0
+  ui_warn '以下文件也在设置本项目管理的网络参数，最终取值取决于文件名顺序：'
+  while IFS= read -r line; do ui_warn "  ${line}"; done <<<"$conflicts"
+  ui_warn "本项目写的是 ${our_path}；如需以本项目为准，请先与对方文件明确分工。"
+}
+
 network_report_bbr_state() {
   if network_bbr_available; then
     ui_ok '拥塞控制：BBR 可用（配合 fq 调度器）。'
@@ -251,10 +301,19 @@ network_apply_sysctl_runtime() {
 }
 
 network_apply_sysctl() {
+  # A container shares the host kernel: these knobs are either not writable or
+  # would change the host (and every other tenant on it). Refuse loudly instead of
+  # half-applying and leaving the operator believing tuning is on.
+  if platform_is_container; then
+    ui_warn "检测到容器环境（${OS_VIRT}）：内核网络参数与宿主机共享，不写入 ${NETWORK_SYSCTL_PATH}。"
+    ui_warn '容器内的 BBR / 缓冲区调优必须在宿主机上完成。'
+    return 0
+  fi
   # Load tcp_bbr before building, so the generated file includes bbr/fq whenever
   # the kernel can actually provide them.
   network_ensure_bbr_module || true
   network_capture_runtime
+  network_report_conflicts "$NETWORK_SYSCTL_PATH" "${ASSESS_PROFILE:-balanced}"
   core_register_failure_hook network_restore_runtime
   txn_begin 'network sysctl'
   txn_write_file "$NETWORK_SYSCTL_PATH" 0644 < <(network_build_sysctl "${ASSESS_PROFILE:-balanced}") || return 1
@@ -318,6 +377,15 @@ network_swap_size_mb() {
   if (( mem < 512 )); then printf 768; else printf 512; fi
 }
 
+# Pure: does a swap file of $1 MiB fit in $2 MiB of free space, leaving headroom?
+# Unknown input counts as sufficient: this guard exists to stop an obviously
+# impossible allocation, not to block on a value that could not be read.
+network_swap_space_sufficient() {
+  local size="${1:-}" avail="${2:-}"
+  [[ $size =~ ^[0-9]+$ && $avail =~ ^[0-9]+$ ]] || return 0
+  (( avail >= size + NETWORK_SWAP_SPACE_HEADROOM_MB ))
+}
+
 # True when the host already runs some swap, in which case we leave it alone.
 network_swap_present_on_host() {
   if network_swap_is_active; then return 0; fi
@@ -326,13 +394,26 @@ network_swap_present_on_host() {
 }
 
 network_configure_swap() {
-  local policy="${1:-auto}" mem size_mb fstab="$NETWORK_FSTAB_PATH"
+  local policy="${1:-auto}" mem size_mb avail fstab="$NETWORK_FSTAB_PATH"
   if ! network_swap_policy_valid "$policy"; then core_die "Swap 策略无效：$policy"; return 1; fi
   [[ $policy != no ]] || { ui_info '按配置跳过 Swap。'; return 0; }
+  if platform_is_container; then
+    ui_warn "检测到容器环境（${OS_VIRT}）：不在容器内创建 Swap（通常不被允许，且会影响宿主机）。"
+    return 0
+  fi
   if network_swap_present_on_host; then ui_info '系统已有活动 Swap，保持不变。'; return 0; fi
   mem="$(platform_mem_mb)"
   if ! network_swap_should_create "$policy" "$mem"; then ui_info '内存充足，自动策略不创建 Swap。'; return 0; fi
   size_mb="$(network_swap_size_mb "$mem")"
+  # Creating the file without checking free space can fill a small disk, which
+  # takes the node down far harder than having no swap. Deploy only required
+  # 220 MiB, so this was reachable.
+  avail="$(platform_free_mb_at "$(dirname -- "$NETWORK_SWAP_PATH")" || true)"
+  if ! network_swap_space_sufficient "$size_mb" "$avail"; then
+    ui_warn "磁盘空间不足：创建 ${size_mb} MiB Swap 需要至少 $((size_mb + NETWORK_SWAP_SPACE_HEADROOM_MB)) MiB 余量，当前仅 ${avail} MiB。"
+    ui_warn "本次跳过 Swap；如需启用，请先释放空间，或用 --swap no 明确关闭本项。"
+    return 0
+  fi
   # dry-run 优先于测试模式，理由同 firewall_apply：安全闸门必须可测。
   if core_is_dry_run; then
     core_dry_run_note "would create ${size_mb} MiB swap at $NETWORK_SWAP_PATH and add it to $fstab"

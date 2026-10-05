@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 
-PROXY_KNOWN_UNITS=(xray.service sing-box.service hysteria-server.service hysteria.service tuic.service naive.service shadowsocks-libev.service)
+# 只列具体 unit。xray@.service 这类模板 unit 需要实例名，无法靠猜发现，
+# 因此只支持通过 --proxy-units 显式指定。
+PROXY_KNOWN_UNITS=(
+  xray.service v2ray.service sing-box.service
+  hysteria.service hysteria-server.service hysteria2.service
+  tuic.service tuic-server.service
+  naive.service naiveproxy.service
+  shadowsocks-libev.service shadowsocks-rust.service
+  trojan.service trojan-go.service
+  mieru.service brook.service snell-server.service mtg.service
+)
 PROXY_SYSTEMD_DIR=/etc/systemd/system
 
 proxy_unit_exists() {
@@ -27,24 +37,68 @@ proxy_discover_units() {
 }
 
 proxy_limits_for_profile() {
+  # OOMScoreAdjust is configurable because its default is a deliberate trade-off,
+  # not an obvious win: +100 makes the proxy the first thing the kernel kills under
+  # memory pressure, which keeps the host (and your SSH session) reachable but
+  # takes the service down. On a single-purpose proxy node an operator may prefer
+  # a negative value. See README「代理资源限制」。
+  local oom="${INFRA_PROXY_OOM_SCORE_ADJUST:-100}"
+  [[ $oom =~ ^-?[0-9]+$ ]] || oom=100
   case "${1:-balanced}" in
-    minimal) printf '%s\n' '65536 1024 100' ;;
-    performance) printf '%s\n' '524288 8192 100' ;;
-    *) printf '%s\n' '262144 4096 100' ;;
+    minimal) printf '%s\n' "65536 1024 ${oom}" ;;
+    performance) printf '%s\n' "524288 8192 ${oom}" ;;
+    *) printf '%s\n' "262144 4096 ${oom}" ;;
   esac
 }
 
-# systemd 的 drop-in 目录是 <unit>.d。传入的 unit 已带 .service 后缀，
-# 若直接拼 "${unit}.d" 会得到 xray.service.service.d —— 一个 systemd 永远
-# 不会读取的目录，导致资源限制静默失效。
+# The unit's effective LimitNOFILE as systemd resolves it. "infinity" and any
+# unreadable value are passed through so the caller can avoid lowering them.
+proxy_current_nofile() {
+  local unit="$1" value
+  platform_has_systemd || return 1
+  value="$(systemctl show -p LimitNOFILE --value "$unit" 2>/dev/null)" || return 1
+  [[ -n $value ]] || return 1
+  printf '%s\n' "$value"
+}
+
+# Never lower a limit the operator already raised. The ephemeral-port rule already
+# follows "widen only" (network_ports_need_widening); the drop-in hardcoded three
+# profile values and would have quietly cut a host tuned to 1048576 down to 262144.
+proxy_choose_nofile() {
+  local want="${1:-}" current="${2:-}"
+  if [[ ! $want =~ ^[0-9]+$ ]]; then printf '%s\n' "$want"; return 0; fi
+  case "$current" in
+    '')       printf '%s\n' "$want" ;;
+    infinity) printf '%s\n' 'infinity' ;;
+    *)
+      if [[ $current =~ ^[0-9]+$ ]] && (( current > want )); then
+        printf '%s\n' "$current"
+      else
+        printf '%s\n' "$want"
+      fi ;;
+  esac
+}
+
+# systemd 从 <unit 全名>.d 读取 drop-in —— 类型后缀要保留：
+# xray.service 的 drop-in 目录是 xray.service.d，不是 xray.d。
+#
+# 在真实 systemd 257（Debian 13）上实测判定：
+#   把同样内容放进 xray.d/          → systemctl show 完全看不到
+#   放进 xray.service.d/            → 生效
+# 发行版自带的样例也一律是这种形式：systemd-logind.service.d、
+# systemd-udevd.service.d、rc-local.service.d。
+#
+# v1.6.3 曾把这里"修"成 ${1%.service}.d（即 xray.d），反而把一个本来正确的
+# 路径改错了，资源限制再次静默失效。证据见 docs/_local/verification/dropin-probe.out.txt。
 proxy_dropin_path() {
-  printf '%s/%s.d/50-infra-node.conf\n' "${PROXY_SYSTEMD_DIR%/}" "${1%.service}"
+  printf '%s/%s.d/50-infra-node.conf\n' "${PROXY_SYSTEMD_DIR%/}" "$1"
 }
 
 proxy_write_dropin() {
   local unit="$1" restart="${2:-no}" nofile tasks oom path
   if ! core_safe_unit "$unit"; then core_die "非法 systemd unit：$unit"; return 1; fi
   read -r nofile tasks oom < <(proxy_limits_for_profile "${ASSESS_PROFILE:-balanced}")
+  nofile="$(proxy_choose_nofile "$nofile" "$(proxy_current_nofile "$unit" || true)")"
   path="$(proxy_dropin_path "$unit")"
   txn_begin 'proxy resource limits'
   txn_write_file "$path" 0644 <<EOF_DROPIN || return 1

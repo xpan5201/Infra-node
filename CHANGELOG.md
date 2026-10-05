@@ -22,6 +22,17 @@
 
 ### Fixed
 
+- **代理 drop-in 路径回归：`<unit>.d` 改回 `<unit>.service.d`。**
+  v1.6.3 把原来的 `${unit}.d` 当成 bug"修"成了 `${unit%.service}.d`，
+  理由是前者会得到 `xray.service.service.d` —— 这是**误判**：`unit` 变量本身
+  已含 `.service`，拼 `${unit}.d` 得到的正是 `xray.service.d`，本来是对的。
+  改成 `xray.d` 之后 systemd 反而不再读取，资源限制**第二次**静默失效。
+
+  已在真实 **systemd 257（Debian 13）** 上实测判定：同一份 drop-in 放进
+  `xray.d/` 时 `systemctl show` 完全看不到，放进 `xray.service.d/` 才生效；
+  发行版自带的样例一律是 `systemd-logind.service.d`、`systemd-udevd.service.d`、
+  `rc-local.service.d` 这种形式。回归断言已按实测结论改正，证据见
+  `docs/_local/verification/dropin-probe.out.txt`。
 - **安装锁不可重入**：`self-update --apply` 会在 `self-update` 内部再次调用
   `deploy_run`，而 `flock` 属于打开的文件描述，第二次获取会与自身死锁。
   现在已持有锁时直接复用。
@@ -60,9 +71,10 @@
 - **防火墙确认后不再被失败钩子撤销。** 拆分为 `FIREWALL_APPLIED` 与 `FIREWALL_CONFIRMED`
   两个状态位；提交后、用户已确认后、从未下发运行时规则时都不再回滚。
   `disable` 改用独立钩子，不再复用 configure 的语义。
-- **代理 systemd 资源限制此前从未生效。** drop-in 路径写成了
-  `/etc/systemd/system/<unit>.service.d/`（即 `xray.service.service.d`），
-  systemd 永不读取该目录。现改为正确的 `<unit>.d`。这是长期静默失效的功能缺陷。
+- **代理 systemd 资源限制此前从未生效。** drop-in 被写到
+  `/etc/systemd/system/<unit>.d/`，而 systemd 只读 **unit 全名**（含 `.service`）
+  加 `.d` 的目录，因此永不加载。当时改成了 `<unit>.d`（去掉 `.service`），
+  方向反了 —— 正确的路径是 `<unit>.service.d`，由 Unreleased 一节修正。
 - **Swap 与 `/etc/fstab` 一致性。** fstab 改写统一走事务快照，
   `network_rollback_swap` 不再修改 fstab，消除两个独立失败钩子争用同一文件、
   可能留下悬空 swap 条目导致下次开机 degraded 的问题。

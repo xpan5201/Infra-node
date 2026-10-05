@@ -681,8 +681,14 @@ bash "$ROOT/tests/lib/git-gate.sh" "$ROOT" "$gate_tree" "$TMP/gate-parent" >/dev
 pass 'failing preflight aborts the install'
 
 # --- Proxy drop-in path (resource limits silently did nothing) ----------------
-[[ $(proxy_dropin_path xray.service) == '/etc/systemd/system/xray.d/50-infra-node.conf' ]] || fail 'proxy drop-in path is wrong'
-[[ $(proxy_dropin_path sing-box.service) == '/etc/systemd/system/sing-box.d/50-infra-node.conf' ]] || fail 'proxy drop-in path mishandles a dashed unit'
+# The full unit name keeps its type suffix: the drop-in directory for
+# xray.service is xray.service.d, NOT xray.d. Determined empirically on real
+# systemd 257 (Debian 13) — a drop-in placed in xray.d/ is never read, and every
+# directory the distribution ships is named <unit>.service.d. The assertion that
+# used to live here encoded the opposite, which is how v1.6.3 turned a correct
+# path into a broken one. Evidence: _local/verification/dropin-probe.out.txt
+[[ $(proxy_dropin_path xray.service) == '/etc/systemd/system/xray.service.d/50-infra-node.conf' ]] || fail 'proxy drop-in path is wrong'
+[[ $(proxy_dropin_path sing-box.service) == '/etc/systemd/system/sing-box.service.d/50-infra-node.conf' ]] || fail 'proxy drop-in path mishandles a dashed unit'
 # Regression: `"${unit}.d"` with unit=xray.service yields xray.service.service.d,
 # a directory systemd never reads, so the resource limits silently did nothing.
 [[ $(proxy_dropin_path xray.service) != *'.service.service.d'* ]] || fail 'proxy drop-in reintroduced the double .service suffix'
@@ -837,5 +843,67 @@ mkdir -p "$TMP/plain-dir"
   || fail 'a directory without .git should be reported as such'
 pass 'local source fallback explains itself'
 INFRA_ETC_DIR="$_etc_saved"; INFRA_INSTALL_DIR="$_install_saved"
+
+# --- batch C: adaptive decisions ---------------------------------------------
+
+# Containers share the host kernel, so kernel-level tuning has to be refused
+# rather than half-applied. OS_VIRT was previously detected and only displayed.
+_saved_virt="${OS_VIRT:-none}"
+OS_VIRT=docker;  platform_is_container || fail 'docker must count as a container'
+OS_VIRT=openvz;  platform_is_container || fail 'openvz must count as a container'
+OS_VIRT=kvm;     if platform_is_container; then fail 'a KVM guest must not count as a container'; fi
+OS_VIRT=none;    if platform_is_container; then fail 'bare metal must not count as a container'; fi
+OS_VIRT=wsl;     platform_is_wsl || fail 'wsl should be recognised as WSL'
+OS_VIRT="$_saved_virt"
+pass 'virtualisation classification'
+
+# Creating a swap file without checking free space can fill a small disk, which
+# takes the node down far harder than having no swap at all. Deploy only asked
+# for 220 MiB, so a 768 MiB swap file was reachable on an almost-full disk.
+network_swap_space_sufficient 512 4096 || fail '512 MiB swap should fit in 4 GiB free'
+if network_swap_space_sufficient 512 600; then fail '512 MiB of swap must not pass with only 600 MiB free'; fi
+if network_swap_space_sufficient 768 900; then fail 'the reserved headroom was ignored'; fi
+network_swap_space_sufficient 512 '' || fail 'an unreadable free-space value must not block creation'
+pass 'swap space guard leaves headroom'
+
+# Never lower a limit the operator already raised: the port-range rule already
+# follows "widen only", the drop-in did not.
+[[ $(proxy_choose_nofile 262144 1048576) == 1048576 ]] || fail 'a higher existing LimitNOFILE was lowered'
+[[ $(proxy_choose_nofile 262144 1024) == 262144 ]] || fail 'a lower existing LimitNOFILE was not raised'
+[[ $(proxy_choose_nofile 262144 infinity) == infinity ]] || fail 'LimitNOFILE=infinity was replaced by a finite value'
+[[ $(proxy_choose_nofile 262144 '') == 262144 ]] || fail 'an unreadable LimitNOFILE should fall back to the profile value'
+pass 'proxy drop-in only ever raises limits'
+
+# Assign at top level and read inside $( ) — exporting inside a command
+# substitution makes shellcheck emit its SC2030/SC2031 pair, and the value only
+# needs to be visible to the read either way.
+_oom_saved="${INFRA_PROXY_OOM_SCORE_ADJUST:-}"
+[[ $(proxy_limits_for_profile balanced | awk '{print $3}') == 100 ]] \
+  || fail 'the default OOMScoreAdjust should stay 100'
+INFRA_PROXY_OOM_SCORE_ADJUST=-500
+[[ $(proxy_limits_for_profile balanced | awk '{print $3}') == -500 ]] \
+  || fail 'INFRA_PROXY_OOM_SCORE_ADJUST was ignored'
+INFRA_PROXY_OOM_SCORE_ADJUST=bogus
+[[ $(proxy_limits_for_profile balanced | awk '{print $3}') == 100 ]] \
+  || fail 'a bogus OOMScoreAdjust should fall back to 100'
+if [[ -n $_oom_saved ]]; then INFRA_PROXY_OOM_SCORE_ADJUST="$_oom_saved"; else unset INFRA_PROXY_OOM_SCORE_ADJUST; fi
+pass 'proxy OOM score is configurable'
+
+# Symmetry with the firewall, which refuses to take over when UFW, firewalld or a
+# foreign nftables chain is present. sysctl had no equivalent check.
+_saved_dir="$NETWORK_SYSCTL_DIR"; _saved_conf="$NETWORK_SYSCTL_CONF"
+NETWORK_SYSCTL_DIR="$TMP/sysctl-d"; NETWORK_SYSCTL_CONF="$TMP/sysctl-d/absent.conf"
+mkdir -p "$NETWORK_SYSCTL_DIR"
+printf 'net.core.somaxconn = 1\n# a comment\nunrelated.key = 2\n' >"$NETWORK_SYSCTL_DIR/50-someone-else.conf"
+printf 'net.core.somaxconn = 3\n' >"$NETWORK_SYSCTL_DIR/99-infra-node.conf"
+_conf="$(network_find_conflicts "$NETWORK_SYSCTL_DIR/99-infra-node.conf" "$(printf 'net.core.somaxconn\n')")"
+[[ $_conf == *'50-someone-else.conf: net.core.somaxconn'* ]] || fail "conflict scan missed an overlap: ${_conf}"
+[[ $_conf != *'99-infra-node.conf'* ]] || fail 'conflict scan reported our own file'
+[[ $_conf != *'unrelated.key'* ]] || fail 'conflict scan reported a key we do not manage'
+_conf="$(network_find_conflicts "$NETWORK_SYSCTL_DIR/99-infra-node.conf" "$(printf 'unrelated.key\n')")"
+[[ $_conf != *'somaxconn'* ]] || fail 'conflict scan ignored the managed-key list'
+network_managed_keys balanced | grep -Fxq 'net.core.somaxconn' || fail 'network_managed_keys missed a key we write'
+pass 'sysctl conflict scan'
+NETWORK_SYSCTL_DIR="$_saved_dir"; NETWORK_SYSCTL_CONF="$_saved_conf"
 
 printf 'Smoke tests passed.\n'

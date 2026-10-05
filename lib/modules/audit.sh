@@ -53,6 +53,16 @@ audit_run() {
     else
       audit_ok '未发现高风险网络参数'
     fi
+    # Symmetry with the firewall, which refuses to take over when UFW, firewalld
+    # or a foreign nftables chain is already present. sysctl had no such check.
+    local conflicts
+    conflicts="$(network_find_conflicts "$sysctl_file" "$(network_managed_keys "${ASSESS_PROFILE:-balanced}")")"
+    if [[ -n $conflicts ]]; then
+      audit_warn '另有文件也在设置本项目管理的网络参数（最终取值取决于文件名顺序）：'
+      while IFS= read -r line; do audit_warn "  ${line}"; done <<<"$conflicts"
+    else
+      audit_ok '没有其它 sysctl 文件争用本项目管理的参数'
+    fi
   else
     audit_warn '网络配置尚未部署'
   fi
@@ -79,7 +89,7 @@ audit_run() {
 }
 
 status_run() {
-  local sysctl_file deployed profile
+  local sysctl_file deployed profile recommended
   sysctl_file="$(audit_sysctl_file)"
   deployed="$(update_deployed_version)"
   profile="$(update_deployed_profile)"
@@ -95,6 +105,16 @@ status_run() {
   if [[ -n $deployed && -n ${INFRA_VERSION:-} && $deployed != "$INFRA_VERSION" ]]; then
     ui_warn "已应用的主机配置由 v${deployed} 生成，与当前 v${INFRA_VERSION} 不一致。"
     ui_warn '新版本引入的主机参数在重新部署前不会生效：sudo infra-node deploy'
+  fi
+  # The profile is computed once at deploy time and never re-evaluated, so a
+  # resized VPS keeps the tier it was first detected as. Compare against what
+  # detection would say today and say so when they diverge.
+  if [[ -n $profile ]]; then
+    recommended="$(assessment_choose_profile auto 2>/dev/null || true)"
+    if [[ -n $recommended && $recommended != "$profile" ]]; then
+      ui_warn "按当前资源重新评估，建议档位为 ${recommended}（已部署的是 ${profile}）。"
+      ui_warn '资源有增减时可运行 sudo infra-node deploy 重新适配。'
+    fi
   fi
   if platform_has_systemd; then ui_section '已发现代理服务（只读）'; proxy_status || true; fi
 }
