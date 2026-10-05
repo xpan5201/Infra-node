@@ -8,6 +8,11 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/infra-node-integration.XXXXXX")"
 trap 'rm -rf -- "$TMP"' EXIT
 
+# Make a failure self-describing. Without this, a failing step inside the install
+# preflight only surfaces as "Smoke Test 未通过" with no line number, which cost
+# several CI round trips to localise.
+trap 'printf "\nINTEGRATION FAILED at %s line %s: %s (rc=%s)\n" "${BASH_SOURCE[0]}" "$LINENO" "$BASH_COMMAND" "$?" >&2' ERR
+
 cp -a -- "$ROOT" "$TMP/source"
 rm -rf -- "$TMP/source/.git" "$TMP/source/dist"
 cd "$TMP/source"

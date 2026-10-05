@@ -88,15 +88,28 @@ network_buffer_max_bytes() {
 # exposed 44620-48715, about 4000 ports). A proxy that opens many outbound
 # connections exhausts that and fails with EADDRNOTAVAIL. Never narrows an
 # already-wide range, because that could collide with local service ports.
-network_ports_config() {
-  local current low high
-  current="$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null || true)"
+NETWORK_PORT_RANGE_MIN_SPAN=28000
+
+# Pure predicate over a "low<TAB>high" string. Split out from the probe so it can be
+# tested by passing a value directly: a stubbed `sysctl` shell function does NOT
+# survive into the preflight smoke run (which executes with a cleared environment),
+# so a test that relies on stubbing it reads the real host value instead and becomes
+# host-dependent — which is exactly how a false failure reached CI.
+network_ports_need_widening() {
+  local current="${1:-}" low high
   read -r low high <<<"$current"
-  if [[ $low =~ ^[0-9]+$ && $high =~ ^[0-9]+$ ]] && (( high - low >= 28000 )); then
+  if [[ $low =~ ^[0-9]+$ && $high =~ ^[0-9]+$ ]] && (( high - low >= NETWORK_PORT_RANGE_MIN_SPAN )); then
     return 1
   fi
-  printf '%s\n' 'net.ipv4.ip_local_port_range = 10240 65535'
   return 0
+}
+
+network_ports_config() {
+  if network_ports_need_widening "$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null || true)"; then
+    printf '%s\n' 'net.ipv4.ip_local_port_range = 10240 65535'
+    return 0
+  fi
+  return 1
 }
 
 # Drop keys this kernel does not expose. A host with IPv6 disabled at boot
