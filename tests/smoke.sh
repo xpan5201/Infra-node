@@ -570,6 +570,80 @@ unset -f swapon platform_mem_mb
 INFRA_DRY_RUN=0
 pass 'dry-run performs no writes'
 
+# --- swap policy decisions (the part that can actually go wrong) ---------------
+# The real `swapon` call cannot be exercised everywhere (the WSL2 kernel rejects
+# swapfiles outright), but the decisions that cause real damage — creating swap on
+# a machine that does not need it, and leaving a dangling /etc/fstab entry — are
+# pure logic and are covered here.
+network_swap_policy_valid auto || fail 'policy auto rejected'
+network_swap_policy_valid yes  || fail 'policy yes rejected'
+network_swap_policy_valid no   || fail 'policy no rejected'
+network_swap_policy_valid bogus && fail 'invalid swap policy accepted'
+network_swap_policy_valid ''    && fail 'empty swap policy accepted'
+
+# network_swap_should_create returns 0 (true) when swap SHOULD be created.
+network_swap_should_create no 256     && fail 'policy no still wanted to create swap'
+network_swap_should_create yes 16384  || fail 'policy yes refused to create swap'
+network_swap_should_create auto 1023  || fail 'auto should create swap below 1 GiB'
+network_swap_should_create auto 1024  && fail 'auto must not create swap at exactly 1 GiB'
+network_swap_should_create auto 16384 && fail 'auto must not create swap on a large host'
+network_swap_should_create auto ''    || fail 'unreadable memory should still favour creating swap'
+network_swap_should_create bogus 128  && fail 'invalid policy must not create swap'
+
+[[ $(network_swap_size_mb 256) == 768 ]] || fail 'small host should get the larger swap file'
+[[ $(network_swap_size_mb 511) == 768 ]] || fail 'boundary 511 MiB should get 768'
+[[ $(network_swap_size_mb 512) == 512 ]] || fail 'boundary 512 MiB should get 512'
+[[ $(network_swap_size_mb 4096) == 512 ]] || fail 'large host should get the default size'
+# Unreadable memory is treated as "very small", which pairs with
+# network_swap_should_create's fallback of creating swap on an unknown host.
+[[ $(network_swap_size_mb '') == 768 ]] || fail 'unreadable memory should take the small-host path'
+pass 'swap policy decisions'
+
+# fstab must gain exactly one entry, and only when it is missing.
+swap_fstab="$TMP/swap-fstab"
+printf '/dev/vda1 / ext4 defaults 0 1\n' >"$swap_fstab"
+NETWORK_FSTAB_PATH="$swap_fstab"
+NETWORK_SWAP_PATH="/swapfile.infra-node"
+rendered="$(network_fstab_with_swap "$swap_fstab")"
+[[ $(printf '%s\n' "$rendered" | grep -c '^/swapfile.infra-node none swap sw 0 0$') == 1 ]] || fail 'fstab rendering must add exactly one swap line'
+[[ $(printf '%s\n' "$rendered" | grep -c '^/dev/vda1') == 1 ]] || fail 'fstab rendering dropped the original entry'
+# The guard that prevents a second write once the line is present.
+printf '%s\n' "$rendered" >"$swap_fstab"
+grep -Fqx "$NETWORK_SWAP_PATH none swap sw 0 0" "$swap_fstab" \
+  || fail 'committed fstab should now contain the exact swap line'
+# An unreadable/absent fstab still yields a usable file.
+absent_render="$(network_fstab_with_swap "$TMP/does-not-exist")"
+[[ $absent_render == '/swapfile.infra-node none swap sw 0 0' ]] || fail 'missing fstab was not handled'
+pass 'swap fstab rendering and idempotency guard'
+
+# Rollback removes the swapfile but must NOT touch fstab: the fstab edit belongs to
+# the enclosing transaction, and two hooks writing one file is how a dangling entry
+# survives to break the next boot.
+rollback_swap="$TMP/rollback-swapfile"
+printf 'swapdata\n' >"$rollback_swap"
+NETWORK_SWAP_PATH="$rollback_swap"
+NETWORK_SWAP_CREATED=1
+rollback_fstab="$TMP/rollback-fstab"
+printf '%s\n' "$rendered" >"$rollback_fstab"
+NETWORK_FSTAB_PATH="$rollback_fstab"
+before_fstab="$(cat "$rollback_fstab")"
+swapoff() { return 0; }
+network_rollback_swap
+[[ ! -e $rollback_swap ]] || fail 'rollback left the swapfile behind'
+[[ $(cat "$rollback_fstab") == "$before_fstab" ]] || fail 'rollback must not edit fstab itself'
+(( NETWORK_SWAP_CREATED == 0 )) || fail 'rollback did not clear the created flag'
+# A committed transaction must not be rolled back at all.
+NETWORK_SWAP_CREATED=1
+printf 'swapdata\n' >"$rollback_swap"
+TXN_OUTCOME=committed
+network_rollback_swap
+[[ -e $rollback_swap ]] || fail 'committed swap was rolled back'
+TXN_OUTCOME=none
+NETWORK_SWAP_CREATED=0
+rm -f "$rollback_swap"
+unset -f swapoff
+pass 'swap rollback leaves fstab to the transaction'
+
 # The dry-run gate must be evaluated BEFORE the test-mode short-circuit. If test
 # mode won, the safety gate could never be exercised by this suite and the
 # "dry-run performs no writes" test above would be silently vacuous.

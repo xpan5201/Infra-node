@@ -288,15 +288,51 @@ network_rollback_swap() {
   NETWORK_SWAP_CREATED=0
 }
 
+# --- swap policy: pure decision helpers ---------------------------------------
+# Split out of network_configure_swap() so the decisions can be tested without
+# touching the kernel. The real swapon() call cannot be exercised in every test
+# environment (the WSL2 kernel rejects swapfiles outright), but the choices that
+# actually go wrong — should we create, how big, do we duplicate the fstab entry —
+# are all computable and therefore testable.
+
+network_swap_policy_valid() {
+  [[ ${1:-} == auto || ${1:-} == yes || ${1:-} == no ]]
+}
+
+# auto: only when the host is short on memory. yes: always. no: never.
+network_swap_should_create() {
+  local policy="${1:-auto}" mem="${2:-0}"
+  [[ $mem =~ ^[0-9]+$ ]] || mem=0
+  case "$policy" in
+    no) return 1 ;;
+    yes) return 0 ;;
+    auto) (( mem < 1024 )) && return 0; return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Smaller machines get a slightly larger file; they have the least headroom.
+network_swap_size_mb() {
+  local mem="${1:-0}"
+  [[ $mem =~ ^[0-9]+$ ]] || mem=0
+  if (( mem < 512 )); then printf 768; else printf 512; fi
+}
+
+# True when the host already runs some swap, in which case we leave it alone.
+network_swap_present_on_host() {
+  if network_swap_is_active; then return 0; fi
+  if swapon --noheadings --show=NAME 2>/dev/null | grep -q .; then return 0; fi
+  return 1
+}
+
 network_configure_swap() {
   local policy="${1:-auto}" mem size_mb fstab="$NETWORK_FSTAB_PATH"
-  if [[ $policy != auto && $policy != yes && $policy != no ]]; then core_die "Swap 策略无效：$policy"; return 1; fi
+  if ! network_swap_policy_valid "$policy"; then core_die "Swap 策略无效：$policy"; return 1; fi
   [[ $policy != no ]] || { ui_info '按配置跳过 Swap。'; return 0; }
-  network_swap_is_active && { ui_info '系统已有活动 Swap，保持不变。'; return 0; }
-  swapon --noheadings --show=NAME 2>/dev/null | grep -q . && { ui_info '系统已有活动 Swap，保持不变。'; return 0; }
+  if network_swap_present_on_host; then ui_info '系统已有活动 Swap，保持不变。'; return 0; fi
   mem="$(platform_mem_mb)"
-  [[ $policy == yes || $mem -lt 1024 ]] || { ui_info '内存充足，自动策略不创建 Swap。'; return 0; }
-  size_mb=512; (( mem < 512 )) && size_mb=768
+  if ! network_swap_should_create "$policy" "$mem"; then ui_info '内存充足，自动策略不创建 Swap。'; return 0; fi
+  size_mb="$(network_swap_size_mb "$mem")"
   # dry-run 优先于测试模式，理由同 firewall_apply：安全闸门必须可测。
   if core_is_dry_run; then
     core_dry_run_note "would create ${size_mb} MiB swap at $NETWORK_SWAP_PATH and add it to $fstab"
