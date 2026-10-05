@@ -4,6 +4,25 @@ Infra-node 是用于代理节点 VPS 的**主机基础设施层**。它提前完
 
 > 项目不安装代理程序，不生成代理配置、证书、密钥或订阅，不修改 SSH 用户/密钥/认证方式，也不运行常驻测速、监控或自动更新代理任务。
 
+## v1.6.4 重点
+
+- **代理 systemd 资源限制的 drop-in 路径修正为 `<unit>.service.d/`。**
+  systemd 从 **unit 全名**（含类型后缀）加 `.d` 读取 drop-in：`xray.service`
+  对应 `xray.service.d/`，不是 `xray.d/`。v1.6.3 曾把这条本来正确的路径改错
+  （见下），导致资源限制第二次静默失效；已在真实 systemd 257 上实测判定后改回。
+- **更新系统补完。** 新增 `self-check`（只读查新版本）、`self-rollback`
+  （回滚到上一次自更新前的版本）、`self-update --apply`（更新后自动重新部署）；
+  默认更新通道改为跟随**发行 tag**；并新增**配置漂移检测** —— 升级后如果没重新
+  `deploy`，新版本引入的主机参数不会生效，现在会被报出来。详见「更新、回滚与配置漂移」。
+- **自适应补完。** 容器内不再写内核网络参数或创建 Swap（会影响到宿主机）；
+  写入 sysctl 前检测是否有其它文件在争用同一批参数；创建 Swap 前按实际大小校验磁盘余量；
+  代理 drop-in **只增不减**（不会把运维已经调高的 `LimitNOFILE` 调低）；
+  受支持的代理 service 名单从 7 个扩到 16 个；`status` 会提示档位是否需要重新适配。
+- **本地检出不可用时会说明原因**，不再静默改用远端克隆（此前"从本地这棵树安装"
+  可能实际装的是远端 ref，且全程无提示）。
+- 修正 README 中与代码矛盾的网络参数清单（此前声明不写 `tcp_fastopen`、
+  `ip_local_port_range`、大缓冲区，而代码三项都会写）。
+
 ## v1.6.3 修复重点
 
 - **BBR 此前是静默失效的。** Debian / Ubuntu 的 `tcp_bbr` 是默认不加载的模块，
@@ -15,11 +34,6 @@ Infra-node 是用于代理节点 VPS 的**主机基础设施层**。它提前完
   详见下文的「网络调优」。
 - **`--dry-run` 现在真的只预演。** 此前它仍会写入 sysctl、journald 和代理 drop-in，
   创建固定目录，并在小内存主机上创建 Swap 与写 `/etc/fstab`；现在所有写入路径都已拦截。
-- **代理 systemd 资源限制的 drop-in 路径修正为 `<unit>.service.d/`。**
-  systemd 从 **unit 全名**（含类型后缀）加 `.d` 读取 drop-in，
-  `xray.service` 对应 `xray.service.d/`，不是 `xray.d/`。已在真实 systemd 257
-  上实测判定（放进 `xray.d/` 完全不生效，放进 `xray.service.d/` 才生效），
-  发行版自带的 `systemd-logind.service.d`、`rc-local.service.d` 也是同一形式。
 - **内核缺少 IPv6 开关（`ipv6.disable=1`）时不再中止整个部署**，
   改为按内核实际支持的开关过滤并提示被跳过的项。
 - **`backup restore` 增加固定路径白名单**，越界事务会在删除任何文件前整批中止。
@@ -45,9 +59,9 @@ Infra-node 是用于代理节点 VPS 的**主机基础设施层**。它提前完
 从发行 ZIP：
 
 ```bash
-# 先从 Releases 页面下载 Infra-node-v1.6.3.zip
-unzip Infra-node-v1.6.3.zip
-cd Infra-node-v1.6.3
+# 先从 Releases 页面下载 Infra-node-v1.6.4.zip
+unzip Infra-node-v1.6.4.zip
+cd Infra-node-v1.6.4
 sudo bash bootstrap.sh
 ```
 
@@ -57,12 +71,12 @@ sudo bash bootstrap.sh
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends git ca-certificates
 
-git clone --depth 1 --branch v1.6.3 https://github.com/xpan5201/Infra-node.git
+git clone --depth 1 --branch v1.6.4 https://github.com/xpan5201/Infra-node.git
 cd Infra-node
 sudo bash bootstrap.sh
 ```
 
-> 想跟随最新提交，把 `--branch v1.6.3` 换成 `--branch main`。
+> 想跟随最新提交，把 `--branch v1.6.4` 换成 `--branch main`。
 
 > 发行包不含 `.git`，因此安装后 `repo.env` 不会记录提交 SHA，
 > `self-update` 也无法按 SHA 锁定版本。需要锁版本请用 Git 仓库并传入完整 SHA。

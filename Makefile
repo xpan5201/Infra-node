@@ -25,7 +25,7 @@ shellcheck:
 	@if command -v shellcheck >/dev/null 2>&1; then \
 	  shellcheck -x $(SHELLCHECK_FILES); \
 	else \
-	  printf 'shellcheck 未安装，跳过（CI 会执行）。\n'; \
+	  printf 'shellcheck 未安装，跳过本项（apt-get install shellcheck）。\n'; \
 	fi
 
 check: syntax smoke integration shellcheck

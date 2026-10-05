@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.6.4 - 2026-10-05
 
-> 更新系统补完：解决"升级了但配置没变"，并补上此前完全缺失的回滚与版本判断。
+> drop-in 路径回归修正 + 更新系统补完 + 自适应补完。
 
 ### Added
 
@@ -19,6 +19,23 @@
   版本号无法解析时不做新旧判断，仅比较提交。
 - 自更新把**传出的那棵树的 `repo.env` 一并留档**（`.infra-node-repo.env`），
   使回滚能把 `/etc/infra-node/repo.env` 恢复到与代码相符的状态。
+- **虚拟化类型进入决策**（此前只用于显示）：容器（docker / podman / lxc / openvz /
+  systemd-nspawn / proot）内不再写内核网络参数、不创建 Swap，并说明原因 ——
+  容器共享宿主内核，写了要么无效，要么影响同宿主机的其它租户。
+- **sysctl 冲突检测**：写入前扫描 `/etc/sysctl.conf` 与 `/etc/sysctl.d/*.conf`，
+  报出也在设置同一批键的其它文件。防火墙遇到 UFW / firewalld / 他人 nftables 链会
+  拒绝接管，sysctl 此前完全不检查，两套配置只能靠文件名顺序决胜。
+- **Swap 空间预检**：按实际要创建的大小 + 256 MiB 余量校验可用空间，不足则跳过并说明。
+  此前部署期只要求 220 MiB 可用，却可能创建 768 MiB 的文件。
+- **代理 drop-in 只增不减**：读取 unit 现有 `LimitNOFILE` 取较大值，`infinity` 保持
+  `infinity`。临时端口范围那条早已守住"只增不减"，drop-in 此前硬编码三档取值，
+  会把运维已调高的值调低。
+- 代理 unit 名单从 7 个扩到 16 个（补 v2ray / trojan / trojan-go / hysteria2 /
+  tuic-server / shadowsocks-rust / naiveproxy / mieru / brook / snell-server / mtg）。
+- `INFRA_PROXY_OOM_SCORE_ADJUST` 可配（默认仍 `100`），README 说明这是有意的权衡
+  而非显然的收益。
+- `status` 增加**档位漂移**提示：对比 `deploy.env` 记录的档位与按当前资源重新评估的
+  结果，不一致时提示重新适配。此前档位算一次就冻结。
 
 ### Fixed
 
@@ -44,7 +61,36 @@
 - 新增回归：版本号比较（含 `1.6.10 > 1.6.9` 与预发布后缀）、
   最新 tag 解析与排序、更新通道解析与回退、**安装锁可重入**、
   **配置漂移检测**、回滚候选列表（新→旧、排除无关目录）、
-  `repo.env` 随传出树留档。
+  `repo.env` 随传出树留档、**本地检出不可用时是否说明原因**、
+  **虚拟化分类**、**swap 空间余量**、**drop-in 只增不减**、
+  **sysctl 冲突扫描**、**drop-in 路径必须保留 `.service` 后缀**。
+
+### Verified
+
+在真实 **Debian 13（WSL2，内核 6.18.33.2，systemd 257）** 上：
+
+| 门禁 | 结果 |
+|---|---|
+| `make syntax` | rc=0 |
+| `make smoke` | 51 项全 PASS |
+| `make integration` | PASS |
+| `shellcheck 0.10.0` | 零告警 |
+
+端到端（真装 `bootstrap.sh` → 真 `deploy`，脚本自带清理还原，测试机复查干净）：
+
+- 基线 `audit` 报 `OK 没有其它 sysctl 文件争用本项目管理的参数`；
+  放入一个争用同一批键的文件后，`audit` 与 `deploy --dry-run` 都报出
+  `WARN /etc/sysctl.d/…: net.core.somaxconn` 等冲突项；移除后恢复 `OK`。
+- `deploy.env` 的档位改成 `minimal` 后，`status` 提示"建议档位为 performance"。
+- 真实 systemd unit 上 `LimitNOFILE=1048576`，本项目 drop-in 未把它调低
+  （写入的仍是 1048576），且文件确实落在 systemd 会读取的 `…service.d/` 目录。
+- **drop-in 路径判定实验**：同一份 drop-in 放进 `<unit>.d/` 时 `systemctl show`
+  完全看不到，放进 `<unit>.service.d/` 才生效。
+- 配置漂移检测、`self-rollback`（列出 / 真回滚 / 命令链修复 / `repo.env` 一致）、
+  `self-check` 的网络失败路径、`self-update` 端到端，均按预期工作。
+
+**未端到端验证**（WSL 到 GitHub 网络不稳，克隆中途失败；有单元断言但不计入已验证）：
+降级拒绝的触发、`self-update --apply`、回滚时 `.infra-node-repo.env` 的恢复。
 
 ## 1.6.3 - 2026-10-05
 

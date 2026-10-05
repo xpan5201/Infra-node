@@ -72,7 +72,7 @@ if update_tree_has_only_regular_entries "$TMP/bad-tree" >/dev/null 2>&1; then fa
 rm -f "$TMP/bad-tree/unsupported"
 # Windows Git-Bash cannot create symlinks without elevation, so a local run sets
 # INFRA_SMOKE_SKIP_SYMLINKS=1 to skip the symlink-semantics assertions rather than
-# pass them against emulated regular files. CI never sets it.
+# pass them against emulated regular files.
 if [[ ${INFRA_SMOKE_SKIP_SYMLINKS:-0} -eq 1 ]]; then
   printf 'SKIP escaping-symlink assertion (INFRA_SMOKE_SKIP_SYMLINKS=1)\n'
 else
@@ -506,7 +506,7 @@ pass 'first-install free-space preflight'
 
 # Permission auditing must compare permission bits, not decimal mode values.
 # NTFS does not persist POSIX mode bits, so a local Windows run sets
-# INFRA_SMOKE_SKIP_MODES=1. CI never sets it.
+# INFRA_SMOKE_SKIP_MODES=1.
 if [[ ${INFRA_SMOKE_SKIP_MODES:-0} -eq 1 ]]; then
   printf 'SKIP permission-bit audit (INFRA_SMOKE_SKIP_MODES=1)\n'
 else
@@ -727,7 +727,7 @@ INFRA_TEST_MODE="$saved_test_mode"
 pass 'firewall rollback honors confirmed and committed boundaries'
 
 # Git-Bash mis-resolves repo paths containing spaces, so a local Windows run sets
-# INFRA_SMOKE_SKIP_SYNTAX=1; the Makefile 'syntax' target covers this in CI.
+# INFRA_SMOKE_SKIP_SYNTAX=1; the Makefile 'syntax' target covers it there.
 if [[ ${INFRA_SMOKE_SKIP_SYNTAX:-0} -eq 1 ]]; then
   printf 'SKIP trailing bash -n loop (INFRA_SMOKE_SKIP_SYNTAX=1)\n'
 else
@@ -735,13 +735,12 @@ else
 fi
 pass 'Bash syntax'
 
-# Entry points must be committed with the executable bit. GitHub Actions checks the
-# repo out onto Linux, so a 100644 shell script fails with "Permission denied" as
-# soon as make runs it — this silently broke EVERY CI run from v1.6.1 onward, while
-# local testing kept passing because the working copy happened to have +x.
+# Entry points must be committed with the executable bit. A fresh checkout on Linux
+# gives a 100644 shell script "Permission denied" as soon as make runs it; this went
+# unnoticed from v1.6.1 onward because the working copy happened to have +x.
 # Asserted on git's recorded mode rather than the filesystem, since NTFS cannot
-# represent it; the Windows shim skips via INFRA_SMOKE_SKIP_MODES, and CI (Linux)
-# runs the real check.
+# represent it; a Windows shim skips via INFRA_SMOKE_SKIP_MODES, and a Linux run
+# performs the real check.
 if [[ ${INFRA_SMOKE_SKIP_MODES:-0} -eq 1 ]]; then
   printf 'SKIP git mode check (INFRA_SMOKE_SKIP_MODES=1)\n'
 elif command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
@@ -902,7 +901,23 @@ _conf="$(network_find_conflicts "$NETWORK_SYSCTL_DIR/99-infra-node.conf" "$(prin
 [[ $_conf != *'unrelated.key'* ]] || fail 'conflict scan reported a key we do not manage'
 _conf="$(network_find_conflicts "$NETWORK_SYSCTL_DIR/99-infra-node.conf" "$(printf 'unrelated.key\n')")"
 [[ $_conf != *'somaxconn'* ]] || fail 'conflict scan ignored the managed-key list'
-network_managed_keys balanced | grep -Fxq 'net.core.somaxconn' || fail 'network_managed_keys missed a key we write'
+# network_managed_keys must list the keys we actually write, but a naive call is
+# host-dependent in two ways: an earlier test unsets platform_mem_mb, and a Windows
+# Git-Bash has no /proc/sys at all — so every key would be filtered out as
+# "unsupported by this kernel". Pin both seams so the assertion means the same thing
+# everywhere. (The version without pinning passed on Debian and failed on Git-Bash.)
+mkdir -p "$TMP/mk-proc/net/core"
+: >"$TMP/mk-proc/net/core/somaxconn"
+: >"$TMP/mk-proc/net/core/netdev_max_backlog"
+_proc_saved="$NETWORK_PROC_SYS"
+_mem_saved="$(declare -f platform_mem_mb || true)"
+NETWORK_PROC_SYS="$TMP/mk-proc"
+platform_mem_mb() { printf '2048\n'; }
+_keys="$(network_managed_keys balanced)"
+NETWORK_PROC_SYS="$_proc_saved"
+if [[ -n $_mem_saved ]]; then eval "$_mem_saved"; else unset -f platform_mem_mb; fi
+[[ $_keys == *'net.core.somaxconn'* ]] || fail "network_managed_keys missed a key we write: ${_keys}"
+[[ $_keys != *'='* ]] || fail 'network_managed_keys returned whole lines instead of key names'
 pass 'sysctl conflict scan'
 NETWORK_SYSCTL_DIR="$_saved_dir"; NETWORK_SYSCTL_CONF="$_saved_conf"
 

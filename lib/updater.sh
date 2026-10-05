@@ -70,9 +70,9 @@ update_run_smoke() {
   local dir="$1" safe_path sandbox uid gid rc=0 output
   local -a passthrough=()
   safe_path='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-  # Forward the platform skip-guards when a caller set them. CI sets none of these,
-  # so the assertions always run there; they exist only so the suite can run on an
-  # environment without symlinks or POSIX permission bits.
+  # Forward the platform skip-guards when a caller set them. A normal Linux run sets
+  # none of these, so the assertions always run there; they exist only so the suite
+  # can run on an environment without symlinks or POSIX permission bits.
   local _flag
   for _flag in INFRA_SMOKE_SKIP_SYMLINKS INFRA_SMOKE_SKIP_MODES INFRA_SMOKE_SKIP_SYNTAX; do
     [[ -n ${!_flag:-} ]] && passthrough+=("$_flag=${!_flag}")

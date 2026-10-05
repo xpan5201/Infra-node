@@ -63,7 +63,7 @@ update_install_from_source "$TMP/source" https://github.com/xpan5201/Infra-node.
 
 if [[ ${INFRA_SMOKE_SKIP_SYMLINKS:-0} -eq 1 ]]; then
   # Git-Bash cannot create symlinks without elevation, so the link assertions are
-  # skipped rather than failing on an emulated regular file. CI never sets this.
+  # skipped rather than failing on an emulated regular file.
   printf 'SKIP command-link assertions (INFRA_SMOKE_SKIP_SYMLINKS=1)\n'
 else
   [[ -L $INFRA_COMMAND_DIR/infra-node && -L $INFRA_COMMAND_DIR/pvf ]] || { echo 'command links missing' >&2; exit 1; }
