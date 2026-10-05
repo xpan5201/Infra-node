@@ -27,9 +27,10 @@
   拒绝接管，sysctl 此前完全不检查，两套配置只能靠文件名顺序决胜。
 - **Swap 空间预检**：按实际要创建的大小 + 256 MiB 余量校验可用空间，不足则跳过并说明。
   此前部署期只要求 220 MiB 可用，却可能创建 768 MiB 的文件。
-- **代理 drop-in 只增不减**：读取 unit 现有 `LimitNOFILE` 取较大值，`infinity` 保持
-  `infinity`。临时端口范围那条早已守住"只增不减"，drop-in 此前硬编码三档取值，
-  会把运维已调高的值调低。
+- **代理 drop-in 只增不减**：`LimitNOFILE` 与 `TasksMax` 都改为读取 unit 现有值并取较大值，
+  `infinity` 保持 `infinity`。临时端口范围那条早已守住"只增不减"，而 drop-in 此前把两个
+  上限都按三档取值写死：既会把运维调高的 `LimitNOFILE` 调低，也会把 systemd 默认给的
+  `TasksMax`（`kernel.pid_max` 的 15%，约 4915）压到 1024。
 - 代理 unit 名单从 7 个扩到 16 个（补 v2ray / trojan / trojan-go / hysteria2 /
   tuic-server / shadowsocks-rust / naiveproxy / mieru / brook / snell-server / mtg）。
 - `INFRA_PROXY_OOM_SCORE_ADJUST` 可配（默认仍 `100`），README 说明这是有意的权衡

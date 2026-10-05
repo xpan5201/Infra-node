@@ -51,20 +51,26 @@ proxy_limits_for_profile() {
   esac
 }
 
-# The unit's effective LimitNOFILE as systemd resolves it. "infinity" and any
-# unreadable value are passed through so the caller can avoid lowering them.
-proxy_current_nofile() {
-  local unit="$1" value
+# The unit's effective value for a systemd resource property, as systemd resolves
+# it. "infinity" and any unreadable value are passed through so the caller can
+# avoid lowering them.
+proxy_current_limit() {
+  local unit="$1" property="$2" value
   platform_has_systemd || return 1
-  value="$(systemctl show -p LimitNOFILE --value "$unit" 2>/dev/null)" || return 1
+  value="$(systemctl show -p "$property" --value "$unit" 2>/dev/null)" || return 1
   [[ -n $value ]] || return 1
   printf '%s\n' "$value"
 }
 
-# Never lower a limit the operator already raised. The ephemeral-port rule already
-# follows "widen only" (network_ports_need_widening); the drop-in hardcoded three
-# profile values and would have quietly cut a host tuned to 1048576 down to 262144.
-proxy_choose_nofile() {
+# Never lower a limit the operator (or the distribution default) already set
+# higher. The ephemeral-port rule already follows "widen only"
+# (network_ports_need_widening); the drop-in hardcoded three profile values and
+# would have quietly cut a host tuned to LimitNOFILE=1048576 down to 262144.
+#
+# Applies to every ceiling we write, not just LimitNOFILE: TasksMax came from the
+# same three hardcoded profiles and would likewise cut a unit that systemd had
+# given 4915 (15% of the default pid_max) down to 1024.
+proxy_choose_ceiling() {
   local want="${1:-}" current="${2:-}"
   if [[ ! $want =~ ^[0-9]+$ ]]; then printf '%s\n' "$want"; return 0; fi
   case "$current" in
@@ -98,7 +104,8 @@ proxy_write_dropin() {
   local unit="$1" restart="${2:-no}" nofile tasks oom path
   if ! core_safe_unit "$unit"; then core_die "非法 systemd unit：$unit"; return 1; fi
   read -r nofile tasks oom < <(proxy_limits_for_profile "${ASSESS_PROFILE:-balanced}")
-  nofile="$(proxy_choose_nofile "$nofile" "$(proxy_current_nofile "$unit" || true)")"
+  nofile="$(proxy_choose_ceiling "$nofile" "$(proxy_current_limit "$unit" LimitNOFILE || true)")"
+  tasks="$(proxy_choose_ceiling "$tasks" "$(proxy_current_limit "$unit" TasksMax || true)")"
   path="$(proxy_dropin_path "$unit")"
   txn_begin 'proxy resource limits'
   txn_write_file "$path" 0644 <<EOF_DROPIN || return 1

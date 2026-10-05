@@ -870,12 +870,19 @@ if network_swap_space_sufficient 768 900; then fail 'the reserved headroom was i
 network_swap_space_sufficient 512 '' || fail 'an unreadable free-space value must not block creation'
 pass 'swap space guard leaves headroom'
 
-# Never lower a limit the operator already raised: the port-range rule already
-# follows "widen only", the drop-in did not.
-[[ $(proxy_choose_nofile 262144 1048576) == 1048576 ]] || fail 'a higher existing LimitNOFILE was lowered'
-[[ $(proxy_choose_nofile 262144 1024) == 262144 ]] || fail 'a lower existing LimitNOFILE was not raised'
-[[ $(proxy_choose_nofile 262144 infinity) == infinity ]] || fail 'LimitNOFILE=infinity was replaced by a finite value'
-[[ $(proxy_choose_nofile 262144 '') == 262144 ]] || fail 'an unreadable LimitNOFILE should fall back to the profile value'
+# Never lower a limit the unit already has: the port-range rule already follows
+# "widen only", the drop-in did not — for either property it writes.
+[[ $(proxy_choose_ceiling 262144 1048576) == 1048576 ]] || fail 'a higher existing LimitNOFILE was lowered'
+[[ $(proxy_choose_ceiling 262144 1024) == 262144 ]] || fail 'a lower existing LimitNOFILE was not raised'
+[[ $(proxy_choose_ceiling 262144 infinity) == infinity ]] || fail 'LimitNOFILE=infinity was replaced by a finite value'
+[[ $(proxy_choose_ceiling 262144 '') == 262144 ]] || fail 'an unreadable LimitNOFILE should fall back to the profile value'
+# TasksMax comes from the same hardcoded profiles. systemd's own default is 15% of
+# kernel.pid_max (about 4915 with the stock pid_max), so writing 1024 unconditionally
+# lowers it; a real xboard-node.service reports 500, which must still be raised.
+[[ $(proxy_choose_ceiling 1024 4915) == 4915 ]] || fail 'a higher default TasksMax was lowered'
+[[ $(proxy_choose_ceiling 1024 500) == 1024 ]] || fail 'a lower existing TasksMax was not raised'
+[[ $(proxy_choose_ceiling 1024 infinity) == infinity ]] || fail 'TasksMax=infinity was replaced by a finite value'
+[[ $(proxy_choose_ceiling 1024 '') == 1024 ]] || fail 'an unreadable TasksMax should fall back to the profile value'
 pass 'proxy drop-in only ever raises limits'
 
 # Assign at top level and read inside $( ) — exporting inside a command
