@@ -27,6 +27,10 @@ timeout coreutils
 tar tar
 EOF_DEPS
   ((${#missing[@]}==0)) && return 0
+  if ! command -v apt-get >/dev/null 2>&1; then
+    printf '缺少依赖：%s\n本安装器只支持 Debian/Ubuntu（需要 apt-get）。\n' "${missing[*]}" >&2
+    exit 1
+  fi
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y --no-install-recommends ca-certificates "${missing[@]}"
@@ -37,8 +41,11 @@ bootstrap_dependencies
 # shellcheck disable=SC1091
 source "$BOOTSTRAP_ROOT/config/defaults.env"
 ((BOOTSTRAP_YES==0)) || INFRA_ASSUME_YES=1
-INFRA_ROOT="$BOOTSTRAP_ROOT"
-INFRA_VERSION="$(tr -d '\r\n' <"$BOOTSTRAP_ROOT/VERSION")"
+# INFRA_ROOT / INFRA_VERSION are consumed by the libraries loaded below, which a
+# static analyser cannot follow, and by update_install_from_source callers.
+# shellcheck disable=SC2034
+INFRA_ROOT="$BOOTSTRAP_ROOT" INFRA_VERSION="$(tr -d '\r\n' <"$BOOTSTRAP_ROOT/VERSION")"
+# shellcheck disable=SC1090
 for _lib in ui core platform packages transaction updater; do source "$BOOTSTRAP_ROOT/lib/${_lib}.sh"; done
 ui_detect
 core_init "$@"

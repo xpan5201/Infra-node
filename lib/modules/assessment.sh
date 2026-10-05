@@ -37,8 +37,9 @@ assessment_choose_profile() {
 }
 
 assessment_show() {
-  local requested="${1:-auto}"
-  assessment_choose_profile "$requested" >/dev/null
+  # $1 is the already-resolved profile (deploy_run passes $ASSESS_PROFILE), so do
+  # not re-run detection here; it would only repeat the same work.
+  local profile="${1:-${ASSESS_PROFILE:-balanced}}"
   ui_section '主机评估'
   ui_kv '系统' "$OS_PRETTY_NAME"
   ui_kv '架构' "$OS_ARCH"
@@ -46,5 +47,5 @@ assessment_show() {
   ui_kv 'CPU' "${ASSESS_CPU_COUNT} vCPU"
   ui_kv '内存' "${ASSESS_MEM_MB} MiB"
   ui_kv '根盘可用' "${ASSESS_DISK_FREE_MB} MiB"
-  ui_kv '建议档位' "$ASSESS_PROFILE"
+  ui_kv '建议档位' "$profile"
 }

@@ -27,7 +27,7 @@ audit_file_mode() {
 audit_run() {
   AUDIT_WARNINGS=0; AUDIT_ERRORS=0
   ui_section 'Infra-node 审计'
-  [[ -d $INFRA_INSTALL_DIR ]] && audit_ok '安装目录存在' || audit_error '安装目录不存在'
+  if [[ -d $INFRA_INSTALL_DIR ]]; then audit_ok '安装目录存在'; else audit_error '安装目录不存在'; fi
   local required missing=0
   for required in VERSION bin/infra-node bootstrap.sh proxy-vps-foundation.sh tests/smoke.sh config/defaults.env; do
     if [[ -f $INFRA_INSTALL_DIR/$required && ! -L $INFRA_INSTALL_DIR/$required ]]; then :; else
@@ -37,13 +37,26 @@ audit_run() {
   ((missing == 1)) || audit_ok '安装目录结构完整'
   audit_file_mode "$INFRA_LOG_DIR/infra-node.log" 600
   audit_file_mode "$INFRA_ETC_DIR/firewall.nft" 600
-  if [[ -r /etc/sysctl.d/99-infra-node.conf ]]; then
-    grep -Eq '(^|[.])swappiness|tcp_keepalive|ip_local_port_range|tcp_fastopen|rmem_max|wmem_max' /etc/sysctl.d/99-infra-node.conf && audit_error '发现禁止的高侵入网络参数' || audit_ok '未发现高侵入网络参数'
+  # Honour the module-level path so the audit inspects the file that was actually written.
+  local sysctl_file="${NETWORK_SYSCTL_PATH:-/etc/sysctl.d/99-infra-node.conf}"
+  if [[ -r $sysctl_file ]]; then
+    # Forbidden: settings that weaken security or destabilise the host. Buffer
+    # ceilings and tcp_fastopen are deliberately NOT here — v1.6.3 sets them on
+    # purpose for proxy throughput (see docs/05-网络性能方案.md).
+    if grep -Eq '(^|[.])swappiness|tcp_keepalive|tcp_ecn|tcp_tw_recycle|accept_source_route = 1|accept_redirects = 1' "$sysctl_file"; then
+      audit_error '发现禁止的高风险网络参数'
+    else
+      audit_ok '未发现高风险网络参数'
+    fi
   else
     audit_warn '网络配置尚未部署'
   fi
   if platform_has_systemd; then
-    systemctl is-active --quiet systemd-timesyncd.service && audit_ok '时间同步服务活动' || audit_warn 'systemd-timesyncd 未活动或由其他服务接管'
+    if systemctl is-active --quiet systemd-timesyncd.service; then
+      audit_ok '时间同步服务活动'
+    else
+      audit_warn 'systemd-timesyncd 未活动或由其他服务接管'
+    fi
   fi
   printf '\n结果：%d 个错误，%d 个警告。\n' "$AUDIT_ERRORS" "$AUDIT_WARNINGS"
   ((AUDIT_ERRORS==0))
@@ -64,9 +77,23 @@ status_run() {
 doctor_run() {
   local rc=0
   ui_section '环境诊断'
-  for cmd in bash awk sed grep find flock timeout; do command -v "$cmd" >/dev/null 2>&1 && audit_ok "命令可用：$cmd" || { audit_error "命令缺失：$cmd"; rc=1; }; done
+  for cmd in bash awk sed grep find flock timeout; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+      audit_ok "命令可用：$cmd"
+    else
+      audit_error "命令缺失：$cmd"; rc=1
+    fi
+  done
   platform_detect_all || rc=1
-  [[ -w $INFRA_LOG_DIR || ${INFRA_TEST_MODE:-0} -eq 1 ]] && audit_ok '日志目录可写' || { audit_error '日志目录不可写'; rc=1; }
-  [[ -r /proc/sys/net/ipv4/tcp_available_congestion_control ]] && audit_ok '可读取 TCP 拥塞控制能力' || audit_warn '无法读取 TCP 拥塞控制能力'
+  if [[ -w $INFRA_LOG_DIR || ${INFRA_TEST_MODE:-0} -eq 1 ]]; then
+    audit_ok '日志目录可写'
+  else
+    audit_error '日志目录不可写'; rc=1
+  fi
+  if [[ -r /proc/sys/net/ipv4/tcp_available_congestion_control ]]; then
+    audit_ok '可读取 TCP 拥塞控制能力'
+  else
+    audit_warn '无法读取 TCP 拥塞控制能力'
+  fi
   return "$rc"
 }

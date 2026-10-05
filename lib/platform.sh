@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+# Detected host facts. Deliberately global: the check that consumes them lives in
+# another module, so shellcheck cannot see the read.
+# shellcheck disable=SC2034
 OS_ID=unknown OS_VERSION_ID=unknown OS_PRETTY_NAME=unknown OS_ARCH=unknown OS_VIRT=unknown
 
 platform_os_value() {

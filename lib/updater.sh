@@ -3,8 +3,9 @@
 UPDATE_STAGING_DIR=''
 UPDATE_PREVIOUS_DIR=''
 UPDATE_SWAP_COMPLETE=0
+# Set by update_stage_source/update_copy_local_tree, read by the install commands.
+# shellcheck disable=SC2034
 UPDATE_STAGED_COMMIT=''
-UPDATE_STAGED_FROM_LOCAL=0
 UPDATE_LINKS_CAPTURED=0
 UPDATE_INFRA_LINK_STATE=missing
 UPDATE_INFRA_LINK_TARGET=''
@@ -30,7 +31,7 @@ update_tree_has_only_regular_entries() {
   local dir="$1" entry
   while IFS= read -r -d '' entry; do
     if [[ ! -f $entry && ! -d $entry && ! -L $entry ]]; then
-      update_check_error "包含非常规文件：${entry#$dir/}"
+      update_check_error "包含非常规文件：${entry#"$dir"/}"
       return 1
     fi
   done < <(find "$dir" -path "$dir/.git" -prune -o -print0)
@@ -41,7 +42,7 @@ update_validate_symlinks() {
   while IFS= read -r -d '' link; do
     resolved="$(readlink -f "$link" 2>/dev/null || true)"
     if [[ -z $resolved || ( $resolved != "$dir" && $resolved != "$dir"/* ) ]]; then
-      update_check_error "符号链接越界或损坏：${link#$dir/}"
+      update_check_error "符号链接越界或损坏：${link#"$dir"/}"
       return 1
     fi
   done < <(find "$dir" -path "$dir/.git" -prune -o -type l -print0)
@@ -59,7 +60,15 @@ update_normalize_entrypoint_modes() {
 
 update_run_smoke() {
   local dir="$1" safe_path sandbox uid gid rc=0 output
+  local -a passthrough=()
   safe_path='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+  # Forward the platform skip-guards when a caller set them. CI sets none of these,
+  # so the assertions always run there; they exist only so the suite can run on an
+  # environment without symlinks or POSIX permission bits.
+  local _flag
+  for _flag in INFRA_SMOKE_SKIP_SYMLINKS INFRA_SMOKE_SKIP_MODES INFRA_SMOKE_SKIP_SYNTAX; do
+    [[ -n ${!_flag:-} ]] && passthrough+=("$_flag=${!_flag}")
+  done
   output="$(mktemp "${TMPDIR:-/tmp}/infra-node-smoke-output.XXXXXX")"; core_register_tmp "$output"
   if [[ $(id -u) -eq 0 ]]; then
     if ! command -v setpriv >/dev/null 2>&1; then update_check_error 'setpriv 缺失，拒绝以 root 直接执行仓库测试'; return 1; fi
@@ -69,12 +78,12 @@ update_run_smoke() {
     uid="$(id -u nobody)"; gid="$(id -g nobody)"; chown -R "$uid:$gid" "$sandbox"
     setpriv --reuid="$uid" --regid="$gid" --clear-groups --no-new-privs \
       env -i PATH="$safe_path" HOME="$sandbox" TMPDIR="$sandbox" XDG_CONFIG_HOME="$sandbox" SHELL=/bin/bash LANG=C.UTF-8 \
-      GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null INFRA_TEST_MODE=1 \
+      GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null INFRA_TEST_MODE=1 "${passthrough[@]}" \
       timeout 90 bash "$sandbox/tree/tests/smoke.sh" >"$output" 2>&1 || rc=$?
     rm -rf -- "$sandbox"; core_unregister_tmp "$sandbox"
   else
     env -i PATH="$safe_path" HOME="${TMPDIR:-/tmp}" TMPDIR="${TMPDIR:-/tmp}" XDG_CONFIG_HOME="${TMPDIR:-/tmp}" SHELL=/bin/bash LANG=C.UTF-8 \
-      GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null INFRA_TEST_MODE=1 \
+      GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null INFRA_TEST_MODE=1 "${passthrough[@]}" \
       timeout 90 bash "$dir/tests/smoke.sh" >"$output" 2>&1 || rc=$?
   fi
   if ((rc != 0)); then cat "$output" >>"$CORE_LOG_FILE" 2>/dev/null || true; ui_error 'Smoke Test 未通过：'; sed -n '1,40p' "$output" >&2; rm -f -- "$output"; core_unregister_tmp "$output"; return "$rc"; fi
@@ -93,7 +102,7 @@ update_preflight_tree() {
   update_tree_has_only_regular_entries "$dir" || return
   update_validate_symlinks "$dir" || return
   while IFS= read -r -d '' file; do
-    if ! bash -n "$file"; then update_check_error "Bash 语法错误：${file#$dir/}"; return 1; fi
+    if ! bash -n "$file"; then update_check_error "Bash 语法错误：${file#"$dir"/}"; return 1; fi
   done < <(find "$dir" -path "$dir/.git" -prune -o -type f -name '*.sh' -print0)
   if ! bash -n "$dir/bin/infra-node"; then update_check_error 'bin/infra-node 语法错误'; return 1; fi
   if ! bash -n "$dir/config/defaults.env"; then update_check_error 'config/defaults.env 语法错误'; return 1; fi
@@ -110,6 +119,7 @@ update_clone_ref() {
   rm -rf -- "$destination"
   if update_git_with_timeout "$INFRA_GIT_TIMEOUT" clone --quiet --depth 1 --single-branch --branch "$ref" -- "$url" "$destination" >>"$CORE_LOG_FILE" 2>&1; then return 0; fi
   rm -rf -- "$destination"
+  # shellcheck disable=SC2129  # two separate appends, not a redirect group
   update_git_with_timeout "$INFRA_GIT_TIMEOUT" clone --quiet --no-checkout --depth 1 -- "$url" "$destination" >>"$CORE_LOG_FILE" 2>&1
   update_git_with_timeout "$INFRA_GIT_TIMEOUT" -C "$destination" fetch --quiet --depth 1 origin "$ref" >>"$CORE_LOG_FILE" 2>&1
   update_git_with_timeout "$INFRA_GIT_TIMEOUT" -C "$destination" checkout --quiet --detach FETCH_HEAD >>"$CORE_LOG_FILE" 2>&1
@@ -117,7 +127,7 @@ update_clone_ref() {
 
 update_stage_source() {
   local url="$1" ref="$2" destination="$3" local_source="${4:-}" head ref_commit origin dirty
-  UPDATE_STAGED_COMMIT=''; UPDATE_STAGED_FROM_LOCAL=0
+  UPDATE_STAGED_COMMIT=''
   if [[ -n $local_source && -d $local_source/.git ]]; then
     head="$(git -C "$local_source" rev-parse HEAD 2>/dev/null || true)"
     ref_commit="$(git -C "$local_source" rev-parse "${ref}^{commit}" 2>/dev/null || true)"
@@ -126,7 +136,7 @@ update_stage_source() {
     if [[ -n $head && $head == "$ref_commit" && $origin == "$url" && -z $dirty ]]; then
       rm -rf -- "$destination"; install -d -m 0755 "$destination"
       if git -C "$local_source" archive --format=tar HEAD | tar -xf - -C "$destination"; then
-        UPDATE_STAGED_COMMIT="$head"; UPDATE_STAGED_FROM_LOCAL=1; return 0
+        UPDATE_STAGED_COMMIT="$head"; return 0
       fi
       rm -rf -- "$destination"
     fi
@@ -153,24 +163,32 @@ update_atomic_symlink() { local target="$1" link="$2" dir tmp; dir="$(dirname "$
 update_apply_command_links() { update_atomic_symlink "$INFRA_INSTALL_DIR/bin/infra-node" "$INFRA_COMMAND_DIR/infra-node"; update_atomic_symlink "$INFRA_COMMAND_DIR/infra-node" "$INFRA_COMMAND_DIR/pvf"; }
 update_restore_command_links() {
   ((UPDATE_LINKS_CAPTURED==1)) || return 0
-  [[ $UPDATE_INFRA_LINK_STATE == symlink ]] && update_atomic_symlink "$UPDATE_INFRA_LINK_TARGET" "$INFRA_COMMAND_DIR/infra-node" || rm -f -- "$INFRA_COMMAND_DIR/infra-node"
-  [[ $UPDATE_PVF_LINK_STATE == symlink ]] && update_atomic_symlink "$UPDATE_PVF_LINK_TARGET" "$INFRA_COMMAND_DIR/pvf" || rm -f -- "$INFRA_COMMAND_DIR/pvf"
+  if [[ $UPDATE_INFRA_LINK_STATE == symlink ]]; then
+    update_atomic_symlink "$UPDATE_INFRA_LINK_TARGET" "$INFRA_COMMAND_DIR/infra-node"
+  else
+    rm -f -- "$INFRA_COMMAND_DIR/infra-node"
+  fi
+  if [[ $UPDATE_PVF_LINK_STATE == symlink ]]; then
+    update_atomic_symlink "$UPDATE_PVF_LINK_TARGET" "$INFRA_COMMAND_DIR/pvf"
+  else
+    rm -f -- "$INFRA_COMMAND_DIR/pvf"
+  fi
 }
 
 update_write_repo_metadata() {
-  local url="$1" ref="$2" commit="$3"
+  local url="$1" ref="$2" commit="$3" channel=git
+  [[ -n $commit ]] || channel=zip
   mkdir -p -- "$INFRA_ETC_DIR"; txn_begin 'repository metadata'
   txn_write_file "$INFRA_ETC_DIR/repo.env" 0644 <<EOF_META
 URL=$url
 REF=$ref
 COMMIT=$commit
+CHANNEL=$channel
 INSTALLED_AT=$(core_now)
 EOF_META
 }
 
 update_repo_value() { local key="$1" fallback="$2"; if [[ -r $INFRA_ETC_DIR/repo.env ]]; then awk -F= -v k="$key" '$1==k{sub(/^[^=]*=/,"");print;exit}' "$INFRA_ETC_DIR/repo.env"; else printf '%s\n' "$fallback"; fi; }
-update_installed_commit() { update_repo_value COMMIT ''; }
-update_current_commit() { if [[ -d $INFRA_ROOT/.git ]]; then git -C "$INFRA_ROOT" rev-parse HEAD 2>/dev/null || true; else update_installed_commit; fi; }
 
 update_failure_restore() {
   local had=0 failed
@@ -204,7 +222,7 @@ cmd_self_update() {
   core_register_failure_hook update_failure_restore
   core_run_step '拉取 Git 仓库' update_stage_source "$url" "$ref" "$UPDATE_STAGING_DIR"
   new="$UPDATE_STAGED_COMMIT"
-  if [[ -n $expected && ${new,,} != ${expected,,} ]]; then core_die '提交校验失败'; return 1; fi
+  if [[ -n $expected && ${new,,} != "${expected,,}" ]]; then core_die '提交校验失败'; return 1; fi
   core_run_step '执行结构、语法、链接和 Smoke 检查' update_preflight_tree "$UPDATE_STAGING_DIR"
   update_prepare_command_links
   [[ -e $INFRA_INSTALL_DIR ]] && { mv -T -- "$INFRA_INSTALL_DIR" "$UPDATE_PREVIOUS_DIR"; UPDATE_SWAP_COMPLETE=1; }
@@ -222,7 +240,6 @@ update_copy_local_tree() {
   rm -rf -- "$destination"; install -d -m 0755 "$destination"
   tar -C "$source" --exclude='./.git' --exclude='./dist' --exclude='./.DS_Store' --no-xattrs --no-acls --no-selinux -cf - .     | tar -C "$destination" --no-same-owner --no-xattrs --no-acls --no-selinux -xf -
   UPDATE_STAGED_COMMIT="$(git -C "$source" rev-parse HEAD 2>/dev/null || true)"
-  UPDATE_STAGED_FROM_LOCAL=1
 }
 
 update_install_from_source() {
@@ -237,6 +254,7 @@ update_install_from_source() {
     core_run_step '复制本地发行包' update_copy_local_tree "$source" "$UPDATE_STAGING_DIR"
   fi
   commit="$UPDATE_STAGED_COMMIT"
+  [[ -n $commit ]] || ui_warn '此安装来自发行包，未记录 Git 提交；self-update 将无法按 SHA 锁定版本。'
   core_run_step '执行结构、语法、链接和 Smoke 检查' update_preflight_tree "$UPDATE_STAGING_DIR"
   update_prepare_command_links
   if [[ -e $INFRA_INSTALL_DIR ]]; then mv -T -- "$INFRA_INSTALL_DIR" "$UPDATE_PREVIOUS_DIR"; UPDATE_SWAP_COMPLETE=1; fi
