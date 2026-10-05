@@ -604,4 +604,29 @@ else
 fi
 pass 'Bash syntax'
 
+# Entry points must be committed with the executable bit. GitHub Actions checks the
+# repo out onto Linux, so a 100644 shell script fails with "Permission denied" as
+# soon as make runs it — this silently broke EVERY CI run from v1.6.1 onward, while
+# local testing kept passing because the working copy happened to have +x.
+# Asserted on git's recorded mode rather than the filesystem, since NTFS cannot
+# represent it; the Windows shim skips via INFRA_SMOKE_SKIP_MODES, and CI (Linux)
+# runs the real check.
+if [[ ${INFRA_SMOKE_SKIP_MODES:-0} -eq 1 ]]; then
+  printf 'SKIP git mode check (INFRA_SMOKE_SKIP_MODES=1)\n'
+elif command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  while IFS= read -r entry; do
+    mode="${entry%% *}"
+    path="${entry##*$'\t'}"
+    [[ $mode == 100755 ]] || fail "committed without the executable bit (mode $mode): $path"
+  done < <(git -C "$ROOT" ls-files --stage -- bootstrap.sh proxy-vps-foundation.sh bin/infra-node \
+             tests/smoke.sh tests/integration-install.sh)
+  # And they must really be runnable as checked out.
+  for path in bootstrap.sh proxy-vps-foundation.sh bin/infra-node tests/smoke.sh; do
+    [[ -x $ROOT/$path ]] || fail "checked-out entry point is not executable: $path"
+  done
+  pass 'entry points are committed executable'
+else
+  printf 'SKIP git mode check (not a git checkout)\n'
+fi
+
 printf 'Smoke tests passed.\n'
