@@ -20,7 +20,7 @@ base_configure_journald() {
     performance) max_use=256M; keep_free=256M ;;
   esac
   txn_begin 'journald limits'
-  txn_write_file "$path" 0644 <<EOF_JOURNAL
+  txn_write_file "$path" 0644 <<EOF_JOURNAL || return 1
 # Managed by Infra-node. Storage mode intentionally remains system-owned.
 [Journal]
 SystemMaxUse=$max_use
@@ -35,9 +35,9 @@ EOF_JOURNAL
 base_configure_security_updates() {
   local enabled="${1:-no}" path=/etc/apt/apt.conf.d/52infra-node-unattended
   [[ $enabled == yes ]] || { ui_info '未启用自动安全更新。'; return 0; }
-  packages_install unattended-upgrades
+  packages_install unattended-upgrades || return 1
   txn_begin 'security updates'
-  txn_write_file "$path" 0644 <<'EOF_UPDATES'
+  txn_write_file "$path" 0644 <<'EOF_UPDATES' || return 1
 // Managed by Infra-node. Security origins only; no automatic reboot.
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
@@ -46,6 +46,10 @@ EOF_UPDATES
 }
 
 base_prepare_directories() {
+  if core_is_dry_run; then
+    core_dry_run_note "would create $INFRA_ETC_DIR $INFRA_STATE_DIR $INFRA_BACKUP_DIR (0755) and $INFRA_LOG_DIR (0700)"
+    return 0
+  fi
   install -d -m 0755 "$INFRA_ETC_DIR" "$INFRA_STATE_DIR" "$INFRA_BACKUP_DIR"
   install -d -m 0700 "$INFRA_LOG_DIR"
 }

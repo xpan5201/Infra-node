@@ -5,7 +5,6 @@ CORE_LOCK_FD=''
 CORE_STAGE='startup'
 CORE_FAILURE_HOOKS=()
 CORE_TMP_PATHS=()
-CORE_ORIGINAL_ARGS=()
 CORE_TRAP_ACTIVE=0
 
 core_now() { date -u +'%Y-%m-%dT%H:%M:%SZ'; }
@@ -20,25 +19,28 @@ core_log() {
   printf '%s level=%s stage=%q message=%q\n' "$(core_now)" "$level" "$CORE_STAGE" "$*" >>"$CORE_LOG_FILE" 2>/dev/null || true
 }
 
-core_rotate_logs() {
-  local i keep="${INFRA_LOG_KEEP:-5}"
-  [[ $keep =~ ^[0-9]+$ && $keep -ge 1 ]] || keep=5
-  rm -f -- "${CORE_LOG_FILE}.${keep}"
-  for ((i=keep-1; i>=1; i--)); do
-    [[ -e ${CORE_LOG_FILE}.${i} ]] && mv -f -- "${CORE_LOG_FILE}.${i}" "${CORE_LOG_FILE}.$((i+1))"
-  done
-  [[ -s $CORE_LOG_FILE ]] && mv -f -- "$CORE_LOG_FILE" "${CORE_LOG_FILE}.1"
-}
-
 core_init() {
-  CORE_ORIGINAL_ARGS=("$@")
   umask 077
   if [[ ${INFRA_TEST_MODE:-0} -eq 1 ]]; then
     : "${INFRA_LOG_DIR:=${TMPDIR:-/tmp}/infra-node-test-log}"
     : "${INFRA_STATE_DIR:=${TMPDIR:-/tmp}/infra-node-test-state}"
     : "${INFRA_BACKUP_DIR:=${TMPDIR:-/tmp}/infra-node-test-backup}"
   fi
-  mkdir -p -- "$INFRA_LOG_DIR" "$INFRA_STATE_DIR" "$INFRA_BACKUP_DIR" 2>/dev/null || true
+  # State and log directories are mandatory: almost everything below writes into
+  # them, so failing here keeps the error close to its cause instead of surfacing
+  # later as a confusing symptom. The backup directory only matters once a
+  # transaction starts, so it is allowed to degrade to a warning.
+  # Read-only commands (version, help, status) must keep working for a normal
+  # user, so an unwritable state/log directory is reported here and enforced by
+  # the commands that actually persist something: core_atomic_write() and
+  # txn_begin() both retry mkdir and fail loudly at the point of use.
+  if ! mkdir -p -- "$INFRA_LOG_DIR" "$INFRA_STATE_DIR" 2>/dev/null; then
+    printf '提示：当前用户无法创建 %s / %s；只读命令不受影响，写入类命令会报错。\n' \
+      "$INFRA_STATE_DIR" "$INFRA_LOG_DIR" >&2
+  fi
+  if ! mkdir -p -- "$INFRA_BACKUP_DIR" 2>/dev/null; then
+    printf '提示：无法创建事务备份目录 %s，备份与回滚将不可用。\n' "$INFRA_BACKUP_DIR" >&2
+  fi
   CORE_LOG_FILE="$INFRA_LOG_DIR/infra-node.log"
   touch "$CORE_LOG_FILE" 2>/dev/null || CORE_LOG_FILE=/dev/null
   chmod 0600 "$CORE_LOG_FILE" 2>/dev/null || true
@@ -122,9 +124,29 @@ core_safe_repo_url() {
 core_safe_unit() { [[ $1 =~ ^[A-Za-z0-9_.@-]+\.service$ ]]; }
 core_valid_port() { [[ ${1:-} =~ ^[0-9]{1,5}$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
 
+core_is_dry_run() { [[ ${INFRA_DRY_RUN:-0} -eq 1 ]]; }
+
+core_dry_run_note() {
+  core_is_dry_run || return 0
+  printf '    [dry-run] %s\n' "$*"
+}
+
 core_atomic_write() {
   local path="$1" mode="$2" dir tmp
-  dir="$(dirname "$path")"; mkdir -p -- "$dir"
+  dir="$(dirname "$path")"
+  if core_is_dry_run; then
+    core_dry_run_note "would create directory $dir"
+    core_dry_run_note "would write $path (mode $mode)"
+    cat >/dev/null
+    return 0
+  fi
+  # Retry the directory instead of trusting core_init: this is the point where an
+  # unwritable tree must actually fail, rather than at startup for every command.
+  if ! mkdir -p -- "$dir" 2>/dev/null; then
+    core_die "无法创建目录：$dir（请以 root 运行写入类命令）"
+    cat >/dev/null
+    return 1
+  fi
   tmp="$(mktemp "${dir}/.infra-node.XXXXXX")"; core_register_tmp "$tmp"
   cat >"$tmp"; chmod "$mode" "$tmp"; mv -fT -- "$tmp" "$path"; core_unregister_tmp "$tmp"
 }

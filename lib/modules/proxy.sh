@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 PROXY_KNOWN_UNITS=(xray.service sing-box.service hysteria-server.service hysteria.service tuic.service naive.service shadowsocks-libev.service)
+PROXY_SYSTEMD_DIR=/etc/systemd/system
 
 proxy_unit_exists() {
   local unit="$1"
@@ -33,19 +34,30 @@ proxy_limits_for_profile() {
   esac
 }
 
+# systemd 的 drop-in 目录是 <unit>.d。传入的 unit 已带 .service 后缀，
+# 若直接拼 "${unit}.d" 会得到 xray.service.service.d —— 一个 systemd 永远
+# 不会读取的目录，导致资源限制静默失效。
+proxy_dropin_path() {
+  printf '%s/%s.d/50-infra-node.conf\n' "${PROXY_SYSTEMD_DIR%/}" "${1%.service}"
+}
+
 proxy_write_dropin() {
-  local unit="$1" restart="${2:-no}" nofile tasks oom path values
+  local unit="$1" restart="${2:-no}" nofile tasks oom path
   if ! core_safe_unit "$unit"; then core_die "非法 systemd unit：$unit"; return 1; fi
   read -r nofile tasks oom < <(proxy_limits_for_profile "${ASSESS_PROFILE:-balanced}")
-  path="/etc/systemd/system/${unit}.d/50-infra-node.conf"
+  path="$(proxy_dropin_path "$unit")"
   txn_begin 'proxy resource limits'
-  txn_write_file "$path" 0644 <<EOF_DROPIN
+  txn_write_file "$path" 0644 <<EOF_DROPIN || return 1
 # Managed by Infra-node. This file only adjusts process resource limits.
 [Service]
 LimitNOFILE=$nofile
 TasksMax=$tasks
 OOMScoreAdjust=$oom
 EOF_DROPIN
+  if core_is_dry_run; then
+    core_dry_run_note "would reload systemd and leave $unit running"
+    return 0
+  fi
   if platform_has_systemd; then
     systemctl daemon-reload
     if [[ $restart == yes ]]; then systemctl restart "$unit"; else ui_info "已写入 $unit 资源限制；未重启服务。"; fi

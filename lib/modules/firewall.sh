@@ -9,6 +9,11 @@ FIREWALL_ROLLBACK_SCRIPT=/run/infra-node/firewall-rollback.sh
 FIREWALL_ROLLBACK_UNIT=infra-node-firewall-rollback
 FIREWALL_TCP_PORTS=()
 FIREWALL_UDP_PORTS=()
+# FIREWALL_APPLIED   : 本进程真的改过 nft 运行时表
+# FIREWALL_CONFIRMED : 用户已确认保留（或 disable 已完成关键删除）
+# 两者必须分开：只看 CONFIRMED 会让 disable 路径上的失败钩子错误地恢复防火墙，
+# 只看 APPLIED 又会让"确认后提交失败"撤销用户已经批准并已持久化的规则。
+FIREWALL_APPLIED=0
 FIREWALL_CONFIRMED=0
 FIREWALL_PREVIOUS_SNAPSHOT=''
 FIREWALL_SERVICE_WAS_ENABLED=0
@@ -83,27 +88,37 @@ firewall_firewalld_active() {
   return 1
 }
 
-firewall_external_input_chain_exists() {
+# Sets FIREWALL_EXTERNAL_INPUT to one of: none | found | unknown.
+# A named result replaces the previous `return 2` convention, whose meaning was
+# only recoverable by reading `$?` from inside an `else` branch.
+FIREWALL_EXTERNAL_INPUT=none
+firewall_probe_external_input_chain() {
   local rules
-  rules="$(nft list ruleset 2>/dev/null)" || return 2
-  awk '
+  FIREWALL_EXTERNAL_INPUT=none
+  if ! rules="$(nft list ruleset 2>/dev/null)"; then
+    FIREWALL_EXTERNAL_INPUT=unknown
+    return 0
+  fi
+  if awk '
     /^table[[:space:]]+/ {table=$2 " " $3}
     /hook[[:space:]]+input([[:space:]]|;)/ && table != "inet infra_node_filter" {found=1}
     END {exit found ? 0 : 1}
-  ' <<<"$rules"
+  ' <<<"$rules"; then
+    FIREWALL_EXTERNAL_INPUT=found
+  fi
+  return 0
 }
 
 firewall_preflight() {
   if ! command -v nft >/dev/null 2>&1; then core_die 'nft 命令不存在。'; return 1; fi
   if firewall_ufw_active; then core_die '检测到活动 UFW，拒绝重复接管防火墙。'; return 1; fi
   if firewall_firewalld_active; then core_die '检测到活动 firewalld，拒绝重复接管防火墙。'; return 1; fi
-  if firewall_external_input_chain_exists; then
-    core_die '检测到其他 nftables input 基链，拒绝叠加。'
-    return 1
-  else
-    local rc=$?
-    if ((rc != 1)); then core_die '无法读取当前 nftables 规则，拒绝冒险修改。'; return 1; fi
-  fi
+  firewall_probe_external_input_chain
+  case "$FIREWALL_EXTERNAL_INPUT" in
+    found) core_die '检测到其他 nftables input 基链，拒绝叠加。'; return 1 ;;
+    unknown) core_die '无法读取当前 nftables 规则，拒绝冒险修改。'; return 1 ;;
+    *) ;;
+  esac
   if ! platform_has_systemd || ! command -v systemd-run >/dev/null 2>&1; then
     core_die '缺少 systemd-run，无法设置自动回滚保护。'
     return 1
@@ -272,8 +287,18 @@ firewall_restore_snapshot_now() {
 }
 
 firewall_runtime_rollback() {
+  # 提交后一律不回滚。
   [[ ${TXN_OUTCOME:-none} != committed ]] || return 0
+  # 用户已经确认保留，且没有真正下发过运行时规则的场景（例如 disable 路径），
+  # 不归这个钩子管。
+  (( FIREWALL_APPLIED == 1 )) || return 0
   [[ ${INFRA_TEST_MODE:-0} -eq 1 ]] && return 0
+  # 用户已确认保留并已 enable 持久化服务后，本次失败不应撤销已确认的状态：
+  # 只撤销自动回滚计时器，把运行时规则与服务状态留在用户批准的样子。
+  if (( FIREWALL_CONFIRMED == 1 )); then
+    firewall_cancel_rollback
+    return 0
+  fi
   if [[ -x $FIREWALL_ROLLBACK_SCRIPT ]]; then
     /bin/bash "$FIREWALL_ROLLBACK_SCRIPT" || true
   else
@@ -283,17 +308,32 @@ firewall_runtime_rollback() {
   firewall_restore_service_state
 }
 
+firewall_disable_runtime_rollback() {
+  # disable 专用：把运行时表与持久化服务状态还原回删除前的样子。
+  # 不复用 firewall_runtime_rollback —— 那条路径带有 configure 的语义
+  # （自动回滚脚本、CONFIRMED 状态），套用到 disable 上会做出错误决定。
+  [[ ${INFRA_TEST_MODE:-0} -eq 1 ]] && return 0
+  firewall_restore_snapshot_now
+  firewall_cancel_rollback
+  firewall_restore_service_state
+}
+
+firewall_reset_context() {
+  FIREWALL_APPLIED=0
+  FIREWALL_CONFIRMED=0
+  FIREWALL_PREVIOUS_SNAPSHOT=''
+  FIREWALL_SERVICE_TOUCHED=0
+}
+
 firewall_finalize() {
-  (( FIREWALL_CONFIRMED == 1 )) || return 0
   core_unregister_failure_hook firewall_runtime_rollback
+  core_unregister_failure_hook firewall_disable_runtime_rollback
   firewall_cancel_rollback
   if [[ -n ${FIREWALL_PREVIOUS_SNAPSHOT:-} ]]; then
     rm -f -- "$FIREWALL_PREVIOUS_SNAPSHOT"
     core_unregister_tmp "$FIREWALL_PREVIOUS_SNAPSHOT"
   fi
-  FIREWALL_PREVIOUS_SNAPSHOT=''
-  FIREWALL_CONFIRMED=0
-  FIREWALL_SERVICE_TOUCHED=0
+  firewall_reset_context
 }
 
 firewall_configure() {
@@ -316,11 +356,22 @@ firewall_configure() {
 firewall_apply() {
   local tcp_csv="${1:-}" udp_csv="${2:-}" temp previous nft_bin
   FIREWALL_TCP_PORTS=(); FIREWALL_UDP_PORTS=()
+  FIREWALL_APPLIED=0
   FIREWALL_CONFIRMED=0
   FIREWALL_PREVIOUS_SNAPSHOT=''
   firewall_detect_ssh_ports || return
   firewall_parse_ports tcp "$tcp_csv" || return
   firewall_parse_ports udp "$udp_csv" || return
+  # dry-run 优先于测试模式：dry-run 是安全闸门，必须先于任何"模拟"路径生效，
+  # 否则测试模式永远盖住它，这个分支就不可测。
+  if core_is_dry_run; then
+    core_dry_run_note "would enforce nftables table $FIREWALL_TABLE with:"
+    core_dry_run_note "  TCP ports: $(firewall_join_ports "${FIREWALL_TCP_PORTS[@]}")"
+    core_dry_run_note "  UDP ports: $(firewall_join_ports "${FIREWALL_UDP_PORTS[@]}")"
+    core_dry_run_note "would write $FIREWALL_CONFIG, $FIREWALL_HELPER and $FIREWALL_UNIT"
+    core_dry_run_note "would schedule a ${INFRA_FIREWALL_ROLLBACK_SECONDS}s auto-rollback for the confirmation window"
+    return 0
+  fi
   if [[ ${INFRA_TEST_MODE:-0} -eq 1 ]]; then firewall_render_rules; return 0; fi
   firewall_preflight || return
   nft_bin="$(command -v nft)" || { core_die '无法定位 nft 可执行文件。'; return 1; }
@@ -338,6 +389,7 @@ firewall_apply() {
   nft delete table inet infra_node_filter >/dev/null 2>&1 || true
   nft -f "$temp"
   if ! nft list table inet infra_node_filter >/dev/null 2>&1; then core_die '新防火墙规则未成功加载，等待自动回滚。'; return 1; fi
+  FIREWALL_APPLIED=1
 
   txn_begin 'firewall config'
   txn_write_file "$FIREWALL_CONFIG" 0600 <"$temp" || return
@@ -358,6 +410,10 @@ firewall_disable() {
   local previous
   core_require_root || return
   [[ ${INFRA_TEST_MODE:-0} -eq 1 ]] && return 0
+  if core_is_dry_run; then
+    core_dry_run_note "would delete table $FIREWALL_TABLE, $FIREWALL_CONFIG, $FIREWALL_HELPER and $FIREWALL_UNIT"
+    return 0
+  fi
   previous="$(mktemp /run/infra-node-firewall-disable-prev.XXXXXX)"
   core_register_tmp "$previous"
   if command -v nft >/dev/null 2>&1; then
@@ -365,10 +421,11 @@ firewall_disable() {
   else
     : >"$previous"
   fi
+  FIREWALL_APPLIED=1
   FIREWALL_CONFIRMED=0
   FIREWALL_PREVIOUS_SNAPSHOT="$previous"
   firewall_capture_service_state
-  core_register_failure_hook firewall_runtime_rollback
+  core_register_failure_hook firewall_disable_runtime_rollback
   txn_begin 'disable firewall'
   FIREWALL_SERVICE_TOUCHED=1
   # Disable while the unit file still exists, otherwise systemd may leave a

@@ -5,7 +5,9 @@ INFRA_ROOT="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." &
 # shellcheck disable=SC1091
 source "$INFRA_ROOT/config/defaults.env"
 INFRA_VERSION="$(tr -d '\r\n' <"$INFRA_ROOT/VERSION")"
+# shellcheck disable=SC1090
 for _lib in ui core platform packages transaction updater; do source "$INFRA_ROOT/lib/${_lib}.sh"; done
+# shellcheck disable=SC1090
 for _module in assessment base network proxy firewall audit experience deploy; do source "$INFRA_ROOT/lib/modules/${_module}.sh"; done
 source "$INFRA_ROOT/lib/tui.sh"
 
@@ -17,9 +19,9 @@ Infra-node — 代理节点主机基础设施工具（不部署代理服务）
   infra-node [全局选项] <命令> [参数]
 
 全局选项:
-  --yes                自动确认安全提示
+  --yes, -y            自动确认安全提示
   --non-interactive    禁止交互
-  --dry-run            显示部分系统操作但不执行
+  --dry-run            预演：只打印将要写入的路径与要执行的系统变更，不落盘
   --no-color           禁用颜色
 
 命令:
@@ -30,6 +32,7 @@ Infra-node — 代理节点主机基础设施工具（不部署代理服务）
   audit                安全审计
   panel                交互面板
   firewall configure  交互配置并启用/更新自有 nftables 表
+  firewall apply      configure 的兼容别名
   firewall show       查看自有 nftables 表；未启用时友好提示
   firewall disable    删除自有 nftables 表
   firewall enable     configure 的兼容别名
@@ -38,7 +41,9 @@ Infra-node — 代理节点主机基础设施工具（不部署代理服务）
   backup list          列出事务备份
   backup restore ID    恢复指定事务
   self-update [REF] [完整 SHA]
-  version
+                       从 Git 原子刷新已安装程序；第二个参数为 40 位 SHA 时
+                       强制校验目标提交，不符即中止
+  version, -V, --version
   help
 
 deploy 选项:
@@ -54,6 +59,10 @@ firewall configure/enable 选项:
 EOF_USAGE
 }
 
+# Sets INFRA_ASSUME_YES / INFRA_NON_INTERACTIVE / INFRA_DRY_RUN / INFRA_NO_COLOR,
+# which are consumed by the sourced libraries (ui_confirm, ui_detect,
+# core_is_dry_run) that shellcheck cannot follow across `source`.
+# shellcheck disable=SC2034
 parse_global_options() {
   REMAINING_ARGS=()
   while (($#)); do
@@ -62,7 +71,7 @@ parse_global_options() {
       --non-interactive) INFRA_NON_INTERACTIVE=1 ;;
       --dry-run) INFRA_DRY_RUN=1 ;;
       --no-color) INFRA_NO_COLOR=1 ;;
-      --verbose) INFRA_VERBOSE=1 ;;
+      --verbose) ui_warn '--verbose 目前无效果；详细日志请查看 /var/log/infra-node/infra-node.log。' ;;
       --) shift; REMAINING_ARGS+=("$@"); break ;;
       *) REMAINING_ARGS+=("$1") ;;
     esac
@@ -82,6 +91,11 @@ cmd_deploy_parse() {
       *) core_die "deploy 未知参数：$1"; return 1 ;;
     esac
   done
+  # Validate every option here so a typo fails at the point of input, matching the
+  # other options, instead of surfacing later from inside profile detection.
+  if ! assessment_profile_valid "$profile" && [[ $profile != auto ]]; then
+    core_die '--profile 必须为 auto/minimal/balanced/performance'; return 1
+  fi
   if [[ $swap != auto && $swap != yes && $swap != no ]]; then core_die '--swap 必须为 auto/yes/no'; return 1; fi
   if [[ $updates != yes && $updates != no ]]; then core_die '--security-updates 必须为 yes/no'; return 1; fi
   if [[ $restart != yes && $restart != no ]]; then core_die '--restart-proxy 必须为 yes/no'; return 1; fi
@@ -116,7 +130,7 @@ cmd_firewall_configure_parse() {
 }
 
 cmd_firewall_parse() {
-  local action="${1:-show}"
+  local action="${1:-}"
   (($#)) && shift || true
   case "$action" in
     configure|apply) cmd_firewall_configure_parse 0 "$@" ;;
@@ -132,6 +146,12 @@ cmd_firewall_parse() {
       txn_commit || return
       firewall_finalize
       ;;
+    '')
+      # Do not silently guess: tell the operator what the subcommands are, then
+      # still show the (read-only) status so the bare command stays useful.
+      ui_warn '未指定 firewall 子命令；可用：configure | show | disable。以下是当前状态：'
+      firewall_show
+      ;;
     *) core_die '未知 firewall 子命令；可用：configure|show|disable。'; return 1 ;;
   esac
 }
@@ -139,6 +159,7 @@ cmd_firewall_parse() {
 main() {
   parse_global_options "$@"; set -- "${REMAINING_ARGS[@]}"
   ui_detect; core_init "$@"
+  [[ ${INFRA_DRY_RUN:-0} -eq 1 ]] && ui_warn 'dry-run 模式：不会写入任何文件或变更系统状态。'
   local command="${1:-panel}"; (($#)) && shift || true
   case "$command" in
     deploy) cmd_deploy_parse "$@" ;;
