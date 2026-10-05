@@ -390,6 +390,17 @@ TXN_OUTCOME=none
 NETWORK_SWAP_CREATED=0
 pass 'runtime hooks honor committed boundary'
 
+# Regression: status_run hardcoded /etc/sysctl.d/99-infra-node.conf while audit_run
+# honoured NETWORK_SYSCTL_PATH, so the two commands could report on different files.
+# The path now has exactly one source of truth, audit_sysctl_file().
+_prev_sysctl_path="$NETWORK_SYSCTL_PATH"
+NETWORK_SYSCTL_PATH="$TMP/seam.conf"
+[[ $(audit_sysctl_file) == "$TMP/seam.conf" ]] || fail 'audit_sysctl_file ignored NETWORK_SYSCTL_PATH'
+[[ $(grep -c '/etc/sysctl.d/99-infra-node.conf' "$ROOT/lib/modules/audit.sh") -eq 1 ]] \
+  || fail 'the sysctl path is hardcoded again outside audit_sysctl_file'
+NETWORK_SYSCTL_PATH="$_prev_sysctl_path"
+pass 'sysctl path has one source of truth for status and audit'
+
 # Regression: read-only commands must work for a normal user and must not be
 # gated on creating /var/lib/infra-node. Enforcing directory creation at startup
 # broke `version` for non-root users in v1.6.3 development (found on real Debian).

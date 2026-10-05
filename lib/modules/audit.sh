@@ -7,6 +7,11 @@ audit_ok() { printf 'OK    %s\n' "$*"; }
 audit_warn() { printf 'WARN  %s\n' "$*"; AUDIT_WARNINGS=$((AUDIT_WARNINGS+1)); }
 audit_error() { printf 'ERROR %s\n' "$*"; AUDIT_ERRORS=$((AUDIT_ERRORS+1)); }
 
+# Single source of truth for the generated sysctl file. It lives in network.sh, so
+# hardcoding the path here would let status and audit disagree the moment the module
+# changes it — and would bypass the module-level test seam.
+audit_sysctl_file() { printf '%s\n' "${NETWORK_SYSCTL_PATH:-/etc/sysctl.d/99-infra-node.conf}"; }
+
 audit_file_mode() {
   local file="$1" max="$2" mode mode_value max_value
   [[ -e $file ]] || return 0
@@ -38,7 +43,7 @@ audit_run() {
   audit_file_mode "$INFRA_LOG_DIR/infra-node.log" 600
   audit_file_mode "$INFRA_ETC_DIR/firewall.nft" 600
   # Honour the module-level path so the audit inspects the file that was actually written.
-  local sysctl_file="${NETWORK_SYSCTL_PATH:-/etc/sysctl.d/99-infra-node.conf}"
+  local sysctl_file; sysctl_file="$(audit_sysctl_file)"
   if [[ -r $sysctl_file ]]; then
     # Forbidden: settings that weaken security or destabilise the host. Buffer
     # ceilings and tcp_fastopen are deliberately NOT here — v1.6.3 sets them on
@@ -63,12 +68,13 @@ audit_run() {
 }
 
 status_run() {
+  local sysctl_file; sysctl_file="$(audit_sysctl_file)"
   platform_detect_all; assessment_collect
   ui_section 'Infra-node 状态'
   ui_kv '版本' "$INFRA_VERSION"
   ui_kv '系统' "$OS_PRETTY_NAME"
   ui_kv '配置档位' "$(awk -F= '$1=="PROFILE"{print $2}' "$INFRA_STATE_DIR/deploy.env" 2>/dev/null || echo 未部署)"
-  ui_kv '网络配置' "$([[ -r /etc/sysctl.d/99-infra-node.conf ]] && echo 已写入 || echo 未写入)"
+  ui_kv '网络配置' "$([[ -r $sysctl_file ]] && echo 已写入 || echo 未写入)"
   ui_kv '防火墙' "$(command -v nft >/dev/null 2>&1 && nft list table inet infra_node_filter >/dev/null 2>&1 && echo 已启用 || echo 未启用)"
   ui_kv '最近部署' "$(awk -F= '$1=="DEPLOYED_AT"{sub(/^[^=]*=/,"");print}' "$INFRA_STATE_DIR/deploy.env" 2>/dev/null || echo 无)"
   if platform_has_systemd; then ui_section '已发现代理服务（只读）'; proxy_status || true; fi
