@@ -56,6 +56,17 @@ audit_run() {
   else
     audit_warn '网络配置尚未部署'
   fi
+  # Report drift between the running program and the configuration it generated.
+  # This is the only place that surfaces "you upgraded but nothing was re-applied".
+  local deployed
+  deployed="$(update_deployed_version)"
+  if [[ -z $deployed ]]; then
+    audit_warn '主机配置尚未部署（没有 deploy.env）'
+  elif [[ -n ${INFRA_VERSION:-} && $deployed != "$INFRA_VERSION" ]]; then
+    audit_warn "主机配置由 v${deployed} 生成，当前程序为 v${INFRA_VERSION}；请重新运行 deploy"
+  else
+    audit_ok "主机配置与当前程序版本一致（v${deployed}）"
+  fi
   if platform_has_systemd; then
     if systemctl is-active --quiet systemd-timesyncd.service; then
       audit_ok '时间同步服务活动'
@@ -68,15 +79,23 @@ audit_run() {
 }
 
 status_run() {
-  local sysctl_file; sysctl_file="$(audit_sysctl_file)"
+  local sysctl_file deployed profile
+  sysctl_file="$(audit_sysctl_file)"
+  deployed="$(update_deployed_version)"
+  profile="$(update_deployed_profile)"
   platform_detect_all; assessment_collect
   ui_section 'Infra-node 状态'
   ui_kv '版本' "$INFRA_VERSION"
   ui_kv '系统' "$OS_PRETTY_NAME"
-  ui_kv '配置档位' "$(awk -F= '$1=="PROFILE"{print $2}' "$INFRA_STATE_DIR/deploy.env" 2>/dev/null || echo 未部署)"
+  ui_kv '配置档位' "${profile:-未部署}"
   ui_kv '网络配置' "$([[ -r $sysctl_file ]] && echo 已写入 || echo 未写入)"
   ui_kv '防火墙' "$(command -v nft >/dev/null 2>&1 && nft list table inet infra_node_filter >/dev/null 2>&1 && echo 已启用 || echo 未启用)"
   ui_kv '最近部署' "$(awk -F= '$1=="DEPLOYED_AT"{sub(/^[^=]*=/,"");print}' "$INFRA_STATE_DIR/deploy.env" 2>/dev/null || echo 无)"
+  ui_kv '配置版本' "${deployed:-未部署}"
+  if [[ -n $deployed && -n ${INFRA_VERSION:-} && $deployed != "$INFRA_VERSION" ]]; then
+    ui_warn "已应用的主机配置由 v${deployed} 生成，与当前 v${INFRA_VERSION} 不一致。"
+    ui_warn '新版本引入的主机参数在重新部署前不会生效：sudo infra-node deploy'
+  fi
   if platform_has_systemd; then ui_section '已发现代理服务（只读）'; proxy_status || true; fi
 }
 

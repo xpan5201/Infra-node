@@ -110,6 +110,10 @@ core_on_exit() {
 core_die() { core_log ERROR "$*"; ui_error "$*"; return 1; }
 
 core_acquire_lock() {
+  # Re-entrant on purpose. flock locks belong to the open file description, so a
+  # nested caller in the same process (self-update --apply running deploy) opens a
+  # fresh descriptor and would block against the lock this process already holds.
+  [[ -n ${CORE_LOCK_FD:-} ]] && return 0
   local lock="$INFRA_STATE_DIR/infra-node.lock"
   mkdir -p -- "$INFRA_STATE_DIR"
   exec {CORE_LOCK_FD}>"$lock"

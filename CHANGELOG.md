@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+> 更新系统补完：解决"升级了但配置没变"，并补上此前完全缺失的回滚与版本判断。
+
+### Added
+
+- **`self-check`**（等价于 `self-update --check`）：拉取远端 `VERSION` 与提交并比较，
+  **只报告不写入**，不需要 root。此前没有任何办法回答"有没有新版本"。
+- **`self-rollback [备份名|序号|latest]`**：把 `/opt/infra-node.backup.*` 里的旧版本换回来。
+  不带参数时只列出可选项。旧版本目录一直躺在盘上，此前却没有任何命令能用它。
+- **`self-update --apply`**：更新成功后自动重新执行一次 `deploy`。
+- **`self-update --channel tag|main` 与 `--to-tag`**；`INFRA_UPDATE_CHANNEL` 默认 `tag`。
+  远端取不到 tag 时回退到记录的 ref 并提示，不会卡住更新。
+- **配置漂移检测**：`deploy.env` 记录的版本与当前程序版本不一致时，
+  `self-update`、`status`、`audit` 都会报出来并给出修复命令。
+- **降级保护**：目标版本号低于当前版本时拒绝执行，需显式 `--allow-downgrade`。
+  版本号无法解析时不做新旧判断，仅比较提交。
+- 自更新把**传出的那棵树的 `repo.env` 一并留档**（`.infra-node-repo.env`），
+  使回滚能把 `/etc/infra-node/repo.env` 恢复到与代码相符的状态。
+
+### Fixed
+
+- **安装锁不可重入**：`self-update --apply` 会在 `self-update` 内部再次调用
+  `deploy_run`，而 `flock` 属于打开的文件描述，第二次获取会与自身死锁。
+  现在已持有锁时直接复用。
+- `status` 的"配置档位"与 `audit` 的配置版本检查改为共用同一份读取函数，
+  不再各自 awk `/var/lib/infra-node/deploy.env`。
+
+### Tests
+
+- 新增回归：版本号比较（含 `1.6.10 > 1.6.9` 与预发布后缀）、
+  最新 tag 解析与排序、更新通道解析与回退、**安装锁可重入**、
+  **配置漂移检测**、回滚候选列表（新→旧、排除无关目录）、
+  `repo.env` 随传出树留档。
+
 ## 1.6.3 - 2026-10-05
 
 > 接手维护版本：修复真实缺陷，并把主机网络调优做到能真正服务代理转发。

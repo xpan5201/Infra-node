@@ -77,9 +77,73 @@ sudo infra-node deploy            # 部署或重新应用节点基础设施配�
 infra-node status                 # 查看主机、网络、Swap 和代理适配概览
 sudo infra-node check             # 运行环境诊断与安全审计
 sudo infra-node audit             # 只运行安全和配置偏离审计
-sudo infra-node self-update main  # 从 Git main 分支原子刷新已安装程序
+infra-node self-check             # 检查有没有新版本（只读，不需要 root）
+sudo infra-node self-update       # 原子刷新已安装程序
+sudo infra-node self-rollback     # 回滚到自更新前的版本
 infra-node version                # 查看当前安装版本
 ```
+
+## 更新、回滚与配置漂移
+
+### 更新通道
+
+默认通道是 `tag`：`self-update` 只跟随**最新发行 tag**。因此往 `main` 推提交
+不会立刻影响已安装的机器，只有打了 tag 的版本才会被选中。
+远端取不到任何 tag 时会**回退**到记录的 ref 并给出提示，不会因此卡住更新。
+
+```bash
+sudo infra-node self-update                 # 更新到最新 tag
+sudo infra-node self-update --channel main  # 本次改为跟随 main 分支
+sudo infra-node self-update --to-tag        # 本次强制走最新 tag
+sudo infra-node self-update v1.6.3          # 指定 ref
+sudo infra-node self-update main <40位SHA>  # 指定 ref 并锁定提交
+```
+
+`self-check` 只读取远端并报告，不写入任何东西：
+
+```bash
+infra-node self-check          # 等价于 infra-node self-update --check
+```
+
+### 更新后需要重新部署
+
+主机配置（sysctl / journald / 代理 drop-in）是由**部署时的程序版本**生成的，
+而 `self-update` 只替换代码。升级后若新增了调优项，不重新 `deploy` 就不会生效 ——
+程序会比对版本并主动提示，`status` 与 `audit` 也会报告这类漂移：
+
+```
+! 已应用的主机配置由 v1.6.2 生成，当前程序是 v1.6.3。
+! 新版本引入的主机参数在重新部署前不会生效：sudo infra-node deploy
+```
+
+也可以让它在更新成功后直接接着做：
+
+```bash
+sudo infra-node self-update --apply    # 更新成功后自动重新执行一次 deploy
+```
+
+### 回滚
+
+每次自更新都会把旧版本保留在 `/opt/infra-node.backup.<时间戳>`（默认保留 5 份）。
+
+```bash
+sudo infra-node self-rollback          # 只列出可回滚的版本，不做任何改动
+sudo infra-node self-rollback latest   # 回滚到最近一次
+sudo infra-node self-rollback 2        # 按列表序号
+```
+
+回滚同样需要重新 `deploy` 才能让配置与回滚后的版本对齐，命令会提示。
+
+### 降级保护
+
+目标版本号低于当前版本时 `self-update` 会**拒绝执行**（旧版本留在原地），
+除非显式声明：
+
+```bash
+sudo infra-node self-update --allow-downgrade v1.6.2
+```
+
+> 版本号无法解析时不做新旧判断，仅比较提交。
 
 ### 预演（--dry-run）
 

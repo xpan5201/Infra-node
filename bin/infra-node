@@ -40,11 +40,21 @@ Infra-node — 代理节点主机基础设施工具（不部署代理服务）
   experience [URL]     按需 HTTPS 网络测试
   backup list          列出事务备份
   backup restore ID    恢复指定事务
-  self-update [REF] [完整 SHA]
+  self-update [选项] [REF] [完整 SHA]
                        从 Git 原子刷新已安装程序；第二个参数为 40 位 SHA 时
                        强制校验目标提交，不符即中止
+  self-check [REF]     只报告有没有新版本，不安装（不需要 root）
+  self-rollback [备份名|序号|latest]
+                       回滚到上一次自更新前的版本；不带参数时只列出可回滚项
   version, -V, --version
   help
+
+self-update / self-check 选项:
+  --check              等价于 self-check
+  --to-tag             本次目标改为最新发行 tag
+  --channel tag|main   本次使用的更新通道（默认 tag：只跟随已打 tag 的版本）
+  --apply              更新成功后自动重新应用主机配置（等同再跑一次 deploy）
+  --allow-downgrade    允许切到版本号更低的版本
 
 deploy 选项:
   --profile auto|minimal|balanced|performance
@@ -100,6 +110,42 @@ cmd_deploy_parse() {
   if [[ $updates != yes && $updates != no ]]; then core_die '--security-updates 必须为 yes/no'; return 1; fi
   if [[ $restart != yes && $restart != no ]]; then core_die '--restart-proxy 必须为 yes/no'; return 1; fi
   deploy_run "$profile" "$swap" "$updates" "$units" "$restart"
+}
+
+# Sets the SELF_UPDATE_* globals consumed by cmd_self_check/cmd_self_update in
+# lib/updater.sh, which shellcheck cannot follow across `source`.
+# shellcheck disable=SC2034
+cmd_self_update_parse() {
+  local ref='' sha=''
+  while (($#)); do
+    case "$1" in
+      --check) SELF_UPDATE_CHECK=1 ;;
+      --to-tag) SELF_UPDATE_CHANNEL=tag ;;
+      --channel)
+        if [[ $# -lt 2 ]]; then core_die '--channel 缺少值'; return 1; fi
+        SELF_UPDATE_CHANNEL="$2"; shift
+        ;;
+      --apply) SELF_UPDATE_APPLY=1 ;;
+      --allow-downgrade) SELF_UPDATE_ALLOW_DOWNGRADE=1 ;;
+      --) shift; break ;;
+      -*) core_die "self-update 未知参数：$1（可用：--check --to-tag --channel --apply --allow-downgrade）"; return 1 ;;
+      *)
+        if [[ -z $ref ]]; then ref="$1"
+        elif [[ -z $sha ]]; then sha="$1"
+        else core_die 'self-update 最多接受 REF 与完整 SHA 两个位置参数。'; return 1
+        fi
+        ;;
+    esac
+    shift
+  done
+  while (($#)); do
+    if [[ -z $ref ]]; then ref="$1"; elif [[ -z $sha ]]; then sha="$1"; else core_die 'self-update 最多接受 REF 与完整 SHA 两个位置参数。'; return 1; fi
+    shift
+  done
+  if [[ -n ${SELF_UPDATE_CHANNEL:-} && ${SELF_UPDATE_CHANNEL} != tag && ${SELF_UPDATE_CHANNEL} != main ]]; then
+    core_die '--channel 必须为 tag 或 main'; return 1
+  fi
+  if ((SELF_UPDATE_CHECK == 1)); then cmd_self_check "$ref"; else cmd_self_update "$ref" "$sha"; fi
 }
 
 cmd_firewall_configure_parse() {
@@ -178,7 +224,9 @@ main() {
         *) core_die '未知 backup 子命令'; return 1 ;;
       esac
       ;;
-    self-update) cmd_self_update "${1:-}" "${2:-}" ;;
+    self-update) cmd_self_update_parse "$@" ;;
+    self-check) cmd_self_check "${1:-}" ;;
+    self-rollback) cmd_self_rollback "${1:-}" ;;
     version|-V|--version) printf 'Infra-node %s\n' "$INFRA_VERSION" ;;
     help|-h|--help) usage ;;
     *) usage >&2; core_die "未知命令：$command"; return 1 ;;

@@ -754,4 +754,75 @@ else
   printf 'SKIP git mode check (not a git checkout)\n'
 fi
 
+# --- self-update: version comparison, channel, drift, rollback ----------------
+# Deliberately last: the channel tests stub update_git_with_timeout and
+# update_latest_tag, and nothing after this point depends on the real ones.
+
+case "$(update_version_cmp 1.6.3 1.6.10)" in -1) ;; *) fail 'version compare mis-sorted 1.6.3 vs 1.6.10' ;; esac
+case "$(update_version_cmp 1.6.10 1.6.3)" in 1) ;; *) fail 'version compare mis-sorted 1.6.10 vs 1.6.3' ;; esac
+case "$(update_version_cmp v1.6.3 1.6.3)" in 0) ;; *) fail 'version compare rejected a leading v' ;; esac
+case "$(update_version_cmp 1.6.4-rc1 1.6.4)" in 0) ;; *) fail 'a pre-release suffix should collapse onto its release' ;; esac
+case "$(update_version_cmp nonsense 1.6.3)" in '?') ;; *) fail 'an unparseable version should report ?' ;; esac
+pass 'self-update version comparison'
+
+update_git_with_timeout() {
+  printf '%s\n' 'aaa refs/tags/v1.0.0' 'bbb refs/tags/v1.10.0' 'ccc refs/tags/v1.9.0' 'ddd refs/tags/nope'
+}
+[[ $(update_latest_tag 'https://example.test/x.git') == v1.10.0 ]] \
+  || fail 'update_latest_tag did not pick the highest version (lexicographic sort?)'
+update_git_with_timeout() { printf '%s\n' 'aaa refs/heads/main'; }
+if update_latest_tag 'https://example.test/x.git' >/dev/null; then fail 'update_latest_tag should fail when no version tag exists'; fi
+pass 'latest release tag resolution'
+
+update_latest_tag() { printf '%s\n' 'v9.9.9'; }
+[[ $(update_resolve_ref '' tag 'https://example.test/x.git' main) == v9.9.9 ]] || fail 'channel=tag did not resolve to the newest tag'
+[[ $(update_resolve_ref '' main 'https://example.test/x.git' main) == main ]] || fail 'channel=main did not use the recorded ref'
+[[ $(update_resolve_ref develop '' 'https://example.test/x.git' main) == develop ]] || fail 'an explicit ref must win over the channel'
+update_latest_tag() { return 1; }
+[[ $(update_resolve_ref '' tag 'https://example.test/x.git' main 2>/dev/null) == main ]] \
+  || fail 'an unreachable tag list must fall back to the recorded ref, not abort'
+if update_resolve_ref '' bogus 'https://example.test/x.git' main >/dev/null 2>&1; then fail 'an unknown channel must be rejected'; fi
+pass 'update channel resolution'
+
+# `self-update --apply` runs deploy_run from inside self-update, so the same lock
+# is acquired twice. flock belongs to the open file description, so without the
+# re-entrancy guard the second acquire blocks against this very process.
+# Start from "not held" via core_release_lock rather than assigning CORE_LOCK_FD:
+# touching a global the earlier subshell test also assigns is what makes shellcheck
+# emit its SC2030/SC2031 pair.
+INFRA_STATE_DIR="$TMP/lock-state"; mkdir -p "$INFRA_STATE_DIR"
+core_release_lock
+core_acquire_lock || fail 'first lock acquire failed'
+core_acquire_lock || fail 'lock is not re-entrant: self-update --apply would deadlock against itself'
+core_release_lock
+pass 'install lock is re-entrant for nested commands'
+
+_state_saved="${INFRA_STATE_DIR:-}"; _install_saved="${INFRA_INSTALL_DIR:-}"
+INFRA_STATE_DIR="$TMP/drift/state"; INFRA_INSTALL_DIR="$TMP/drift/install"
+mkdir -p "$INFRA_STATE_DIR" "$INFRA_INSTALL_DIR"; printf '1.6.3\n' >"$INFRA_INSTALL_DIR/VERSION"
+if update_report_config_drift >/dev/null 2>&1; then fail 'a missing deploy.env must be reported'; fi
+printf 'PROFILE=balanced\nVERSION=1.6.3\n' >"$INFRA_STATE_DIR/deploy.env"
+update_report_config_drift >/dev/null 2>&1 || fail 'matching versions must report no drift'
+printf 'PROFILE=balanced\nVERSION=1.6.2\n' >"$INFRA_STATE_DIR/deploy.env"
+if update_report_config_drift >/dev/null 2>&1; then fail 'a stale deploy.env must be reported as drift'; fi
+[[ $(update_deployed_profile) == balanced ]] || fail 'update_deployed_profile did not read deploy.env'
+pass 'config drift detection (upgrade without re-deploy)'
+INFRA_STATE_DIR="$_state_saved"
+
+_parent="$TMP/rollback/opt"; INFRA_INSTALL_DIR="$_parent/infra-node"
+mkdir -p "$INFRA_INSTALL_DIR" "$_parent/infra-node.backup.20260101T000000Z-1-00001" \
+         "$_parent/infra-node.backup.20260102T000000Z-1-00002" "$_parent/unrelated"
+_cands="$(update_backup_candidates | tr '\n' ' ')"
+[[ $_cands == 'infra-node.backup.20260102T000000Z-1-00002 infra-node.backup.20260101T000000Z-1-00001 ' ]] \
+  || fail "update_backup_candidates listed the wrong set: ${_cands}"
+pass 'rollback candidate listing (newest first, unrelated dirs excluded)'
+
+_etc_saved="${INFRA_ETC_DIR:-}"; INFRA_ETC_DIR="$TMP/snap/etc"; mkdir -p "$INFRA_ETC_DIR" "$TMP/snap/outgoing"
+printf 'URL=https://example.test/x.git\nREF=main\n' >"$INFRA_ETC_DIR/repo.env"
+update_snapshot_repo_metadata "$TMP/snap/outgoing"
+[[ -r "$TMP/snap/outgoing/.infra-node-repo.env" ]] \
+  || fail 'the outgoing tree got no copy of repo.env; a rollback would keep stale metadata'
+pass 'rollback keeps repository metadata with the outgoing tree'
+INFRA_ETC_DIR="$_etc_saved"; INFRA_INSTALL_DIR="$_install_saved"
+
 printf 'Smoke tests passed.\n'
