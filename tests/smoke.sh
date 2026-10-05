@@ -933,4 +933,14 @@ if [[ -n $_mem_saved ]]; then eval "$_mem_saved"; else unset -f platform_mem_mb;
 pass 'sysctl conflict scan'
 NETWORK_SYSCTL_DIR="$_saved_dir"; NETWORK_SYSCTL_CONF="$_saved_conf"
 
+# defaults.env: tunables must be overridable from the environment, the fixed paths
+# must not be. Getting that backwards is how INFRA_PROXY_OOM_SCORE_ADJUST became a
+# documented-but-unusable knob — plain assignment let the file overwrite the caller,
+# and the file itself is replaced on every self-update, leaving no way to set it.
+_ovr="$(INFRA_PROXY_OOM_SCORE_ADJUST=-500 INFRA_DRY_RUN=1 INFRA_ETC_DIR=/tmp/not-the-contract \
+  bash -c '. "$1/config/defaults.env"; printf "%s|%s|%s" "$INFRA_PROXY_OOM_SCORE_ADJUST" "$INFRA_DRY_RUN" "$INFRA_ETC_DIR"' _ "$ROOT")"
+[[ $_ovr == '-500|1|/etc/infra-node' ]] \
+  || fail "defaults.env override contract broken: ${_ovr} (want -500|1|/etc/infra-node)"
+pass 'defaults.env: tunables overridable, contract paths not'
+
 printf 'Smoke tests passed.\n'
