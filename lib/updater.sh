@@ -133,6 +133,41 @@ update_clone_ref() {
   update_git_with_timeout "$INFRA_GIT_TIMEOUT" -C "$destination" checkout --quiet --detach FETCH_HEAD >>"$CORE_LOG_FILE" 2>&1
 }
 
+# Why the local checkout was not used as the install source. Falling back to a
+# network clone is legitimate, but doing it *silently* means the operator gets a
+# different tree than the one they pointed at with no way to notice — which is
+# exactly how an end-to-end run once installed the wrong commit (root could not
+# read the repository over /mnt/c and nothing said so).
+update_local_source_reason() {
+  local local_source="$1" url="$2" ref="$3" head ref_commit origin dirty
+  local -a why=()
+  if [[ ! -d $local_source/.git ]]; then
+    printf '%s\n' '不是 Git 检出'
+    return 0
+  fi
+  if ! command -v git >/dev/null 2>&1; then
+    printf '%s\n' '系统里没有 git'
+    return 0
+  fi
+  head="$(git -C "$local_source" rev-parse HEAD 2>/dev/null || true)"
+  if [[ -z $head ]]; then
+    printf '%s\n' "git 无法读取该仓库（属主或权限问题；可执行 git config --global --add safe.directory '$local_source' 解决）"
+    return 0
+  fi
+  ref_commit="$(git -C "$local_source" rev-parse "${ref}^{commit}" 2>/dev/null || true)"
+  origin="$(git -C "$local_source" remote get-url origin 2>/dev/null || true)"
+  dirty="$(git -C "$local_source" status --porcelain --untracked-files=no 2>/dev/null || true)"
+  if [[ -z $ref_commit ]]; then why+=("本地没有 ref ${ref}"); fi
+  if [[ -n $ref_commit && $head != "$ref_commit" ]]; then why+=("HEAD ${head:0:12} 不是 ${ref} 的提交 ${ref_commit:0:12}"); fi
+  if [[ -n $origin && $origin != "$url" ]]; then why+=("origin 是 ${origin}，而记录的是 ${url}"); fi
+  if [[ -n $dirty ]]; then why+=('工作区有未提交改动'); fi
+  if ((${#why[@]} == 0)); then
+    printf '%s\n' '未满足本地快路径条件'
+  else
+    printf '%s\n' "${why[*]}"
+  fi
+}
+
 update_stage_source() {
   local url="$1" ref="$2" destination="$3" local_source="${4:-}" head ref_commit origin dirty
   UPDATE_STAGED_COMMIT=''
@@ -148,6 +183,8 @@ update_stage_source() {
       fi
       rm -rf -- "$destination"
     fi
+    ui_warn "未从本地检出安装：$(update_local_source_reason "$local_source" "$url" "$ref")。"
+    ui_warn "改为从 ${url} 拉取 ${ref}；如需装本地这棵树，请先处理上面的原因。"
   fi
   update_clone_ref "$url" "$ref" "$destination" || return
   UPDATE_STAGED_COMMIT="$(git -C "$destination" rev-parse HEAD)" || return

@@ -823,6 +823,19 @@ update_snapshot_repo_metadata "$TMP/snap/outgoing"
 [[ -r "$TMP/snap/outgoing/.infra-node-repo.env" ]] \
   || fail 'the outgoing tree got no copy of repo.env; a rollback would keep stale metadata'
 pass 'rollback keeps repository metadata with the outgoing tree'
+
+# Regression: when the local checkout cannot serve as the install source, the
+# reason must be stated. Falling back to a network clone in silence is how an
+# end-to-end run installed a different commit than the one it was pointed at
+# (root could not read the repo and nothing said so).
+mkdir -p "$TMP/not-a-repo/.git"
+_fallback_reason="$(update_local_source_reason "$TMP/not-a-repo" 'https://example.test/x.git' main)"
+[[ $_fallback_reason == *'无法读取'* ]] \
+  || fail "local-source fallback gave no usable reason: ${_fallback_reason}"
+mkdir -p "$TMP/plain-dir"
+[[ $(update_local_source_reason "$TMP/plain-dir" 'https://example.test/x.git' main) == '不是 Git 检出' ]] \
+  || fail 'a directory without .git should be reported as such'
+pass 'local source fallback explains itself'
 INFRA_ETC_DIR="$_etc_saved"; INFRA_INSTALL_DIR="$_install_saved"
 
 printf 'Smoke tests passed.\n'
