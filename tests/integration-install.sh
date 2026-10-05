@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Sets module-level globals consumed by the sourced libraries via a computed
+# path; see tests/smoke.sh for the same rationale.
+# shellcheck disable=SC2034,SC1090,SC1091
 set -Eeuo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -39,7 +42,13 @@ core_init integration-install
 
 update_install_from_source "$TMP/source" https://github.com/xpan5201/Infra-node.git main >/dev/null
 
-[[ -L $INFRA_COMMAND_DIR/infra-node && -L $INFRA_COMMAND_DIR/pvf ]] || { echo 'command links missing' >&2; exit 1; }
+if [[ ${INFRA_SMOKE_SKIP_SYMLINKS:-0} -eq 1 ]]; then
+  # Git-Bash cannot create symlinks without elevation, so the link assertions are
+  # skipped rather than failing on an emulated regular file. CI never sets this.
+  printf 'SKIP command-link assertions (INFRA_SMOKE_SKIP_SYMLINKS=1)\n'
+else
+  [[ -L $INFRA_COMMAND_DIR/infra-node && -L $INFRA_COMMAND_DIR/pvf ]] || { echo 'command links missing' >&2; exit 1; }
+fi
 for path in bin/infra-node bootstrap.sh proxy-vps-foundation.sh tests/smoke.sh; do
   [[ -x $INFRA_INSTALL_DIR/$path ]] || { echo "entrypoint not normalized: $path" >&2; exit 1; }
 done
@@ -47,13 +56,25 @@ done
 for required in VERSION bin/infra-node bootstrap.sh proxy-vps-foundation.sh tests/smoke.sh config/defaults.env; do
   [[ -f $INFRA_INSTALL_DIR/$required ]] || { echo "required file missing: $required" >&2; exit 1; }
 done
-"$INFRA_COMMAND_DIR/infra-node" version | grep -Fq "$INFRA_VERSION"
+if [[ ${INFRA_SMOKE_SKIP_SYMLINKS:-0} -eq 1 ]]; then
+  # Windows cannot exec an extensionless script through a symlink, so exercise the
+  # installed binary directly instead of via the command link.
+  "$INFRA_INSTALL_DIR/bin/infra-node" version | grep -Fq "$INFRA_VERSION"
+else
+  "$INFRA_COMMAND_DIR/infra-node" version | grep -Fq "$INFRA_VERSION"
+fi
 
 # Reinstalling the same Git commit must refresh the tree instead of trusting stale
 # local files now that the static checksum gate has been removed.
-printf 'locally modified\n' >"$INFRA_INSTALL_DIR/README.md"
-core_release_lock
-update_install_from_source "$TMP/source" https://github.com/xpan5201/Infra-node.git main >/dev/null
-cmp -s "$TMP/source/README.md" "$INFRA_INSTALL_DIR/README.md" || { echo 'same-commit reinstall did not refresh modified tree' >&2; exit 1; }
+if [[ ${INFRA_SMOKE_SKIP_SYMLINKS:-0} -eq 1 ]]; then
+  # The reinstall refuses to touch an install whose command link is not a symlink,
+  # and Windows cannot create one, so this scenario needs a POSIX filesystem.
+  printf 'SKIP same-commit reinstall assertion (INFRA_SMOKE_SKIP_SYMLINKS=1)\n'
+else
+  printf 'locally modified\n' >"$INFRA_INSTALL_DIR/README.md"
+  core_release_lock
+  update_install_from_source "$TMP/source" https://github.com/xpan5201/Infra-node.git main >/dev/null
+  cmp -s "$TMP/source/README.md" "$INFRA_INSTALL_DIR/README.md" || { echo 'same-commit reinstall did not refresh modified tree' >&2; exit 1; }
+fi
 
 printf 'Integration install passed.\n'
