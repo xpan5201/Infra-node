@@ -1,11 +1,18 @@
 # Infra-node
 
-Infra-node 是用于代理节点 VPS 的**主机基础设施层**。它提前完成系统评估、基础安全、保守网络调优、日志与时间同步、可选 Swap、代理 systemd 资源限制适配，以及可选 nftables 主机防火墙。
+Infra-node 是用于代理节点 VPS 的**主机基础设施层**。它提前完成系统评估、基础安全、代理向网络调优、日志与时间同步、可选 Swap、代理 systemd 资源限制适配，以及可选 nftables 主机防火墙。
 
 > 项目不安装代理程序，不生成代理配置、证书、密钥或订阅，不修改 SSH 用户/密钥/认证方式，也不运行常驻测速、监控或自动更新代理任务。
 
 ## v1.6.3 修复重点
 
+- **BBR 此前是静默失效的。** Debian / Ubuntu 的 `tcp_bbr` 是默认不加载的模块，
+  旧判据只 grep 可用算法列表，在全新主机上恒为假 —— 既不写 `fq` / `bbr`，
+  也不给任何提示，用户以为 BBR 已开启而实际仍在跑 cubic。现在先 `modprobe`、
+  重新判定，并写入 `/etc/modules-load.d/50-infra-node-bbr.conf` 让它在重启后依然生效。
+- **代理向网络调优补全**：UDP 缓冲（QUIC / Hysteria / TUIC）、`tcp_fastopen`、
+  `tcp_slow_start_after_idle`、`tcp_notsent_lowat`，以及仅在明显偏窄时拓宽临时端口范围。
+  详见下文的「网络调优」。
 - **`--dry-run` 现在真的只预演。** 此前它仍会写入 sysctl、journald 和代理 drop-in，
   创建固定目录，并在小内存主机上创建 Swap 与写 `/etc/fstab`；现在所有写入路径都已拦截。
 - **代理 systemd 资源限制此前从未生效**：drop-in 被写到 `<unit>.service.d/`，
@@ -156,17 +163,59 @@ sudo infra-node firewall disable                           # 删除自有表、�
 - 自更新不再依赖 `CHECKSUMS.sha256`；即使目标提交相同，也会重新安装 staging 树，以修复本地残留或旧文件。
 - Git 操作禁止交互认证并受硬超时约束。
 
-## 保守网络策略
+## 网络调优
 
-项目只使用有限的主机级参数，例如 `somaxconn`、`netdev_max_backlog`、MTU 探测、安全重定向策略，以及内核已支持时的 `fq + bbr`。
+调优目标是**代理转发的吞吐与延迟**，不是通用"网络优化"。所有取值随主机资源档位或内存自适应，
+且写入前逐个探测内核是否暴露该开关，不支持的键会跳过并明确提示。
 
-项目不会写入：
+### BBR
 
-- `vm.swappiness`
-- 全局 TCP keepalive
-- `ip_local_port_range`
-- `tcp_fastopen`
-- 超大 `rmem_max` / `wmem_max`
+Debian / Ubuntu 把 `tcp_bbr` 编译成模块且**默认不加载**，此时
+`/proc/sys/net/ipv4/tcp_available_congestion_control` 只有 `reno cubic`。
+部署时会：
+
+1. `modprobe tcp_bbr`；
+2. 重新判定，可用才写入 `net.core.default_qdisc = fq` 与
+   `net.ipv4.tcp_congestion_control = bbr`；
+3. 写入 `/etc/modules-load.d/50-infra-node-bbr.conf`，保证重启时模块先于
+   `sysctl.d` 加载，BBR 不会在重启后静默退回 cubic。
+
+内核确实不提供 BBR 时会明确告警，而不是无提示地跳过。
+
+### 参数总表
+
+| 参数 | 取值 | 目的 |
+|---|---|---|
+| `net.core.somaxconn` | 2048 / 4096 / 8192（按档位） | 提升并发连接上限 |
+| `net.core.netdev_max_backlog` | 同上 | 高包速率下减少丢包 |
+| `net.ipv4.tcp_max_syn_backlog` | 同上 | 与 `somaxconn` 同步，避免半连接队列成为瓶颈 |
+| `net.ipv4.tcp_mtu_probing` | `1` | PMTU 黑洞下仍能连通 |
+| `net.ipv4.tcp_syncookies` | `1` | SYN 洪泛防护 |
+| `net.ipv4/ipv6.conf.*.accept_redirects` | `0` | 拒绝 ICMP 重定向篡改路由 |
+| `net.ipv4.conf.*.send_redirects` | `0` | 不充当路由器 |
+| `net.ipv4/ipv6.conf.*.accept_source_route` | `0` | 拒绝源路由 |
+| `net.ipv4.tcp_slow_start_after_idle` | `0` | 代理长连接大量复用，空闲后不应退回慢启动 |
+| `net.ipv4.tcp_notsent_lowat` | `131072` | 降低转发首字节延迟 |
+| `net.core.rmem_max` / `wmem_max` | 4 / 8 / 16 MiB（按内存） | 带宽时延积上限 |
+| `net.ipv4.tcp_rmem` / `tcp_wmem` | 上限同上 | 让自动调优能跟到新上限 |
+| `net.core.rmem_default` / `wmem_default` | 同上 | 未显式设置缓冲的 socket 同样受益 |
+| `net.ipv4.udp_rmem_min` / `udp_wmem_min` | `8192` | QUIC / Hysteria / TUIC 走 UDP |
+| `net.ipv4.tcp_fastopen` | `3` | 降低新建连接延迟 |
+| `net.ipv4.ip_local_port_range` | 仅当跨度 < 28000 时改为 `10240 65535` | 代理大量主动外连时避免 `EADDRNOTAVAIL` |
+| `net.core.default_qdisc` + `net.ipv4.tcp_congestion_control` | `fq` + `bbr`（内核支持时） | 拥塞控制与调度器 |
+
+缓冲上限按内存自适应：`< 1 GiB` → 4 MiB，`1–4 GiB` → 8 MiB，`≥ 4 GiB` → 16 MiB，
+小机器不会被缓冲区吃爆。端口范围**只拓宽不缩窄**，本来已足够宽的系统原样保留。
+
+### 明确不写入
+
+- `vm.swappiness`（不干预内核换页倾向）
+- 全局 TCP keepalive（`net.ipv4.tcp_keepalive_*`）
+- `net.ipv4.tcp_ecn`
+- 任何 `tcp_tw_recycle` 之类已废弃或已知不安全的参数
+- 不修改 SSH 用户、密钥或认证方式
+
+上述禁止项与 `infra-node audit` 的检查清单是同一份判据。
 
 ## 开发与校验
 
@@ -174,7 +223,7 @@ sudo infra-node firewall disable                           # 删除自有表、�
 make check
 ```
 
-`make check` 会执行 Bash 语法检查、入口权限回归、事务提交边界、保守网络策略、防火墙解析与渲染、代理部署边界，以及真实 Git archive 原子安装回归。
+`make check` 会执行 Bash 语法检查、入口权限回归、事务提交边界、网络调参策略、防火墙解析与渲染、代理部署边界，以及真实 Git archive 原子安装回归。
 
 ## 许可证
 

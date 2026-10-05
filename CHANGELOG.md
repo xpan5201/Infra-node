@@ -38,6 +38,10 @@
   CI 里安装了 shellcheck 却拿不到结果。修复其报出的真实问题
   （`${var#"$dir"/}` 未加引号的模式展开、`!=` 右侧未加引号、`A && B || C` 误用），
   其余误报以行内定向 `disable` 并注明原因，未使用整体排除。
+- **README 的网络参数清单与代码矛盾。** README 白纸黑字声明"项目不会写入
+  `ip_local_port_range` / `tcp_fastopen` / 超大 `rmem_max`/`wmem_max`"，
+  而 `network_build_sysctl()` 三项都会写。安装者正是依据这一段判断
+  "这东西会对我机器做什么"，因此按 v1.6.3 的真实行为重写了该节。
 
 ### Added
 
@@ -89,7 +93,7 @@
 ### Verified
 
 在真实 **Debian 13（WSL2，内核 6.18.33.2）** 上验证：
-`make syntax` / `make smoke`（34 项）/ `make integration` 全部通过，shellcheck 零告警；
+`make syntax` / `make smoke`（37 项）/ `make integration` 全部通过，shellcheck 零告警；
 并实测确认 `modprobe tcp_bbr` 前 `tcp_available_congestion_control` 为 `reno cubic`、
 加载后为 `reno cubic bbr`，本项目的生成配置正确写出 `bbr` + `fq`
 且按 15.8 GiB 内存取到 16 MiB 缓冲上限。
