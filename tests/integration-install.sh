@@ -11,6 +11,20 @@ trap 'rm -rf -- "$TMP"' EXIT
 cp -a -- "$ROOT" "$TMP/source"
 rm -rf -- "$TMP/source/.git" "$TMP/source/dist"
 cd "$TMP/source"
+
+# `cp -a` preserves the *source* directory's ownership. When a privileged runner
+# (GitHub Actions runs this container as root) copies a checkout owned by another
+# user, the fixture directory ends up owned by that other user while git runs as
+# root. Git then refuses every repository operation with
+#   fatal: detected dubious ownership in repository at '...'
+# and exits 128. `git init` is unaffected (it only creates files), so the failure
+# surfaced at the next command and looked unrelated. Declaring the fixture safe is
+# what Git itself recommends, and it also covers an externally set GIT_CONFIG_GLOBAL.
+if [[ $(id -u) -eq 0 ]]; then
+  git config --global --get-all safe.directory 2>/dev/null | grep -Fxq "$PWD" \
+    || git config --global --add safe.directory "$PWD" || true
+fi
+
 git init -q -b main
 git config user.email test@example.invalid
 git config user.name InfraTest
