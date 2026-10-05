@@ -434,7 +434,7 @@ firewall_disable() {
   txn_remove "$FIREWALL_CONFIG" || return
   txn_remove "$FIREWALL_HELPER" || return
   txn_remove "$FIREWALL_UNIT" || return
-  command -v nft >/dev/null 2>&1 && nft delete table inet infra_node_filter >/dev/null 2>&1 || true
+  if command -v nft >/dev/null 2>&1; then nft delete table inet infra_node_filter >/dev/null 2>&1 || true; fi
   systemctl daemon-reload || return
   firewall_cancel_rollback
   FIREWALL_CONFIRMED=1

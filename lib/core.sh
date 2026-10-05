@@ -67,7 +67,13 @@ core_run_failure_hooks() {
   for ((i=${#CORE_FAILURE_HOOKS[@]}-1; i>=0; i--)); do "${CORE_FAILURE_HOOKS[$i]}" || core_log ERROR "failure hook failed: ${CORE_FAILURE_HOOKS[$i]}"; done
 }
 
-core_cleanup_tmp() { local p; for p in "${CORE_TMP_PATHS[@]}"; do [[ -n $p ]] && rm -rf -- "$p" 2>/dev/null || true; done; CORE_TMP_PATHS=(); }
+core_cleanup_tmp() {
+  local p
+  for p in "${CORE_TMP_PATHS[@]}"; do
+    if [[ -n $p ]]; then rm -rf -- "$p" 2>/dev/null || true; fi
+  done
+  CORE_TMP_PATHS=()
+}
 
 core_on_error() {
   local rc="$1" line="$2" command="$3"

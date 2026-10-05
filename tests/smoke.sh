@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-# This harness deliberately sets module-level globals and stubs helpers that are
-# only ever called from the sourced libraries, and it sources them through a
-# computed path. Neither is followable by shellcheck, so both checks are off for
-# the whole file rather than sprinkled over ~25 individual sites.
-# shellcheck disable=SC2034,SC1090,SC1091,SC2329,SC2016
+# This harness deliberately sets module-level globals and replaces helpers
+# (sysctl, modinfo, modprobe, platform_mem_mb, ...) with stubs that the sourced
+# libraries call indirectly, and it sources them through a computed path. A static
+# analyser cannot follow any of that, so these checks are disabled for the whole
+# file rather than sprinkled over ~30 individual sites:
+#   SC2034 unused variable        - globals are read by the sourced libraries
+#   SC1090/SC1091 non-constant source
+#   SC2317 unreachable command    - the stubbed helpers are invoked via the libs
+#   SC2329 unused function        - same; SC2317's successor in newer shellcheck
+#   SC2016 single-quoted expansion- intentional literals in assertions
+# shellcheck disable=SC2034,SC1090,SC1091,SC2317,SC2329,SC2016
 set -Eeuo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"

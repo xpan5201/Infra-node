@@ -131,7 +131,7 @@ cmd_firewall_configure_parse() {
 
 cmd_firewall_parse() {
   local action="${1:-}"
-  (($#)) && shift || true
+  if (($#)); then shift; fi
   case "$action" in
     configure|apply) cmd_firewall_configure_parse 0 "$@" ;;
     enable) cmd_firewall_configure_parse 1 "$@" ;;
@@ -160,7 +160,8 @@ main() {
   parse_global_options "$@"; set -- "${REMAINING_ARGS[@]}"
   ui_detect; core_init "$@"
   [[ ${INFRA_DRY_RUN:-0} -eq 1 ]] && ui_warn 'dry-run 模式：不会写入任何文件或变更系统状态。'
-  local command="${1:-panel}"; (($#)) && shift || true
+  local command="${1:-panel}"
+  if (($#)); then shift; fi
   case "$command" in
     deploy) cmd_deploy_parse "$@" ;;
     status) status_run ;;
