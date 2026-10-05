@@ -22,6 +22,9 @@ core_log() {
 core_init() {
   umask 077
   if [[ ${INFRA_TEST_MODE:-0} -eq 1 ]]; then
+    # defaults.env deliberately leaves these three unset in test mode, so these
+    # defaults actually apply and an explicit override from the caller still wins.
+    # A hard assignment there would make the whole relocation a silent no-op.
     : "${INFRA_LOG_DIR:=${TMPDIR:-/tmp}/infra-node-test-log}"
     : "${INFRA_STATE_DIR:=${TMPDIR:-/tmp}/infra-node-test-state}"
     : "${INFRA_BACKUP_DIR:=${TMPDIR:-/tmp}/infra-node-test-backup}"

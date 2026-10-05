@@ -31,8 +31,10 @@
   `infinity` 保持 `infinity`。临时端口范围那条早已守住"只增不减"，而 drop-in 此前把两个
   上限都按三档取值写死：既会把运维调高的 `LimitNOFILE` 调低，也会把 systemd 默认给的
   `TasksMax`（`kernel.pid_max` 的 15%，约 4915）压到 1024。
-- 代理 unit 名单从 7 个扩到 16 个（补 v2ray / trojan / trojan-go / hysteria2 /
-  tuic-server / shadowsocks-rust / naiveproxy / mieru / brook / snell-server / mtg）。
+- 代理 unit 名单从 7 个扩到 17 个（补 v2ray / trojan / trojan-go / hysteria2 /
+  tuic-server / shadowsocks-rust / naiveproxy / mieru / brook / snell-server / mtg，
+  以及面板自带的节点后端 `xboard-node.service` —— Xboard / V2board 系自己拉起 xray
+  子进程，资源限制必须挂在父服务上才会被继承）。
 - `INFRA_PROXY_OOM_SCORE_ADJUST` 可配（默认仍 `100`），README 说明这是有意的权衡
   而非显然的收益。
 - `status` 增加**档位漂移**提示：对比 `deploy.env` 记录的档位与按当前资源重新评估的
@@ -49,8 +51,16 @@
   已在真实 **systemd 257（Debian 13）** 上实测判定：同一份 drop-in 放进
   `xray.d/` 时 `systemctl show` 完全看不到，放进 `xray.service.d/` 才生效；
   发行版自带的样例一律是 `systemd-logind.service.d`、`systemd-udevd.service.d`、
-  `rc-local.service.d` 这种形式。回归断言已按实测结论改正，证据见
-  `docs/_local/verification/dropin-probe.out.txt`。
+  `rc-local.service.d` 这种形式。回归断言已按实测结论改正。
+- **4 处引用指向不存在的文件。** `lib/modules/audit.sh` 与 `lib/modules/proxy.sh`
+  引用了本地私有的 `docs/`（该目录不入库），`tests/smoke.sh` 引用了本地工具脚本，
+  `config/defaults.env` 引用了 README 里并不存在的「代理资源限制」一节。
+  后者改为**把那一节真正写出来** —— 该功能此前在 README 里完全没有说明。
+- **`INFRA_TEST_MODE` 的目录重定位此前是失效的。** `core_init` 用
+  `: "${INFRA_LOG_DIR:=…}"` 推导测试目录，而 `config/defaults.env` 又无条件把这三个
+  路径赋成生产值，`:=` 于是永不触发 —— "测试模式不碰真实固定路径"这个约定等于没有。
+  现在测试模式下不再在 defaults.env 里硬赋值；两条因此"靠侥幸通过"的断言也改成了
+  真正有判别力的写法。
 - **安装锁不可重入**：`self-update --apply` 会在 `self-update` 内部再次调用
   `deploy_run`，而 `flock` 属于打开的文件描述，第二次获取会与自身死锁。
   现在已持有锁时直接复用。

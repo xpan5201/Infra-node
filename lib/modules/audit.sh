@@ -47,7 +47,7 @@ audit_run() {
   if [[ -r $sysctl_file ]]; then
     # Forbidden: settings that weaken security or destabilise the host. Buffer
     # ceilings and tcp_fastopen are deliberately NOT here — v1.6.3 sets them on
-    # purpose for proxy throughput (see docs/05-网络性能方案.md).
+    # purpose for proxy throughput (see the "网络调优" section of README.md).
     if grep -Eq '(^|[.])swappiness|tcp_keepalive|tcp_ecn|tcp_tw_recycle|accept_source_route = 1|accept_redirects = 1' "$sysctl_file"; then
       audit_error '发现禁止的高风险网络参数'
     else

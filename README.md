@@ -282,6 +282,50 @@ Debian / Ubuntu 把 `tcp_bbr` 编译成模块且**默认不加载**，此时
 
 上述禁止项与 `infra-node audit` 的检查清单是同一份判据。
 
+## 代理资源限制
+
+发现受支持的代理 systemd unit 时，会写一份 drop-in
+（`/etc/systemd/system/<unit>.service.d/50-infra-node.conf`），**只**调整三项进程上限：
+
+| 项 | 取值 | 说明 |
+|---|---|---|
+| `LimitNOFILE` | 65536 / 262144 / 524288（按档位） | 仅在高于 unit 现值时才写 |
+| `TasksMax` | 1024 / 4096 / 8192（按档位） | 同上，**只增不减** |
+| `OOMScoreAdjust` | `100`（可用 `INFRA_PROXY_OOM_SCORE_ADJUST` 覆盖） | 见下 |
+
+**只增不减。** 前两项都先读 unit 当前的有效值再取较大者，`infinity` 保持 `infinity` ——
+不会把系统默认或运维已经调高的上限压下来。
+
+**`OOMScoreAdjust` 是有意的权衡，不是显然的收益。** `+100` 让代理在内存紧张时被优先
+杀掉：好处是宿主机与 SSH 会话保得住，代价是业务中断。纯代理节点若要让内核反过来
+保护代理本体：
+
+```bash
+sudo INFRA_PROXY_OOM_SCORE_ADJUST=-500 infra-node --yes deploy --proxy-units <unit>
+```
+
+（`INFRA_*` 可调项都支持这样用环境变量覆盖；固定路径不支持，那是安装契约。）
+
+**自动识别的 unit**：xray、v2ray、sing-box、hysteria / hysteria-server / hysteria2、
+tuic / tuic-server、naive / naiveproxy、shadowsocks-libev / shadowsocks-rust、
+trojan / trojan-go、mieru、brook、snell-server、mtg，以及面板自带的节点后端
+`xboard-node.service`（Xboard / V2board 系自己拉起 xray，限制必须挂在父服务上，
+子进程才会继承）。
+
+其它名字 —— 包括 `xray@.service` 这类模板 unit 的实例 —— 用 `--proxy-units` 显式指定：
+
+```bash
+sudo infra-node --yes deploy --proxy-units my-proxy.service
+```
+
+**写入 drop-in 不会自动重启服务**（默认 `--restart-proxy no`）。`systemctl show` 在
+`daemon-reload` 之后就能看到新值，但**运行中的进程**要到服务重启才真正拿到新上限：
+
+```bash
+systemctl show -p LimitNOFILE -p TasksMax -p OOMScoreAdjust <unit>
+sudo systemctl restart <unit>          # 或在 deploy 时加 --restart-proxy yes
+```
+
 ## 开发与校验
 
 ```bash

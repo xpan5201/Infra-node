@@ -249,8 +249,8 @@ bbr_conf="$NETWORK_MODULES_LOAD_DIR/50-infra-node-bbr.conf"
 [[ -r $bbr_conf ]] || fail 'modules-load.d file missing'
 grep -Fxq 'tcp_bbr' "$bbr_conf" || fail 'modules-load.d file does not request tcp_bbr'
 # The path contract must follow NETWORK_MODULES_LOAD_DIR, so an overridden location
-# is honoured. (That the *default* /etc/modules-load.d is also covered is asserted
-# by docs/_local/check.sh, which runs this file in a clean environment.)
+# is honoured. The default is covered by the same derivation: txn_allowed_paths()
+# reads that variable, never a literal /etc/modules-load.d.
 txn_path_allowed "$NETWORK_MODULES_LOAD_DIR/50-infra-node-bbr.conf" \
   || fail 'modules-load.d is missing from the transaction path contract'
 pass 'tcp_bbr module is loaded and persisted'
@@ -410,26 +410,22 @@ pass 'sysctl path has one source of truth for status and audit'
 # gated on creating /var/lib/infra-node. Enforcing directory creation at startup
 # broke `version` for non-root users in v1.6.3 development (found on real Debian).
 ver_out="$(
-  set +u
-  INFRA_LOG_DIR="$TMP/ro/log" INFRA_STATE_DIR="$TMP/ro/state" INFRA_BACKUP_DIR="$TMP/ro/backup" \
-    bash "$ROOT/bin/infra-node" version 2>&1
-)" || fail 'version command failed with relocated (writable) state dirs'
+  INFRA_TEST_MODE=1 INFRA_LOG_DIR="$TMP/ro/log" INFRA_STATE_DIR="$TMP/ro/state" \
+    INFRA_BACKUP_DIR="$TMP/ro/backup" bash "$ROOT/bin/infra-node" version 2>&1
+)" || fail 'version command failed with relocated state dirs'
 grep -Fq "$INFRA_VERSION" <<<"$ver_out" || fail 'version output missing the version string'
+# The relocation has to be real, or this test is only passing by accident: with
+# defaults.env setting these paths unconditionally the override was silently lost
+# and the "relocated" run still pointed at /var.
+[[ $ver_out != *'无法创建'* ]] || fail 'relocated writable state dirs were ignored (override lost)'
 
-# Now force an unwritable target so core_init's mkdir fails.
-if [[ $(id -u) -eq 0 ]]; then
-  ro_probe="$TMP/ro-root-probe"
-  install -d -m 0555 "$ro_probe"
-  ro_root_out="$(INFRA_TEST_MODE=1 INFRA_LOG_DIR="$ro_probe/log" INFRA_STATE_DIR="$ro_probe/a" \
-    INFRA_BACKUP_DIR="$ro_probe/b" bash "$ROOT/bin/infra-node" version 2>&1)" \
-    || fail 'version must still work when the state tree cannot be created'
-  grep -Fq "$INFRA_VERSION" <<<"$ro_root_out" || fail 'version output missing under unwritable state'
-else
-  ro_out="$(INFRA_TEST_MODE=1 INFRA_LOG_DIR=/proc/nonexistent/log INFRA_STATE_DIR=/proc/nonexistent/state \
-    INFRA_BACKUP_DIR=/proc/nonexistent/backup bash "$ROOT/bin/infra-node" version 2>&1)" \
-    || fail 'version must still work when the state tree cannot be created'
-  grep -Fq "$INFRA_VERSION" <<<"$ro_out" || fail 'version output missing under unwritable state'
-fi
+# Now force a target nothing can create — /proc is not writable even for root, so
+# this branch is the same whether the suite runs as root or not. (A 0555 directory
+# does not work: root ignores the permission bits.)
+ro_out="$(INFRA_TEST_MODE=1 INFRA_LOG_DIR=/proc/nonexistent/log INFRA_STATE_DIR=/proc/nonexistent/state \
+  INFRA_BACKUP_DIR=/proc/nonexistent/backup bash "$ROOT/bin/infra-node" version 2>&1)" \
+  || fail 'version must still work when the state tree cannot be created'
+grep -Fq "$INFRA_VERSION" <<<"$ro_out" || fail 'version output missing under unwritable state'
 
 # And a write command must fail loudly rather than silently doing nothing.
 if bash -c '

@@ -10,6 +10,9 @@ PROXY_KNOWN_UNITS=(
   shadowsocks-libev.service shadowsocks-rust.service
   trojan.service trojan-go.service
   mieru.service brook.service snell-server.service mtg.service
+  # 面板自带的节点后端（Xboard / V2board 系）。它自己拉起 xray 子进程，
+  # 资源限制必须挂在父服务上，子进程才会继承 —— 挂到 xray 上挂不着。
+  xboard-node.service
 )
 PROXY_SYSTEMD_DIR=/etc/systemd/system
 
@@ -95,7 +98,8 @@ proxy_choose_ceiling() {
 # systemd-udevd.service.d、rc-local.service.d。
 #
 # v1.6.3 曾把这里"修"成 ${1%.service}.d（即 xray.d），反而把一个本来正确的
-# 路径改错了，资源限制再次静默失效。证据见 docs/_local/verification/dropin-probe.out.txt。
+# 路径改错了，资源限制再次静默失效。判定依据：同一份 drop-in 放进 xray.d/
+# 时 systemctl show 完全看不到，放进 xray.service.d/ 才生效（systemd 257）。
 proxy_dropin_path() {
   printf '%s/%s.d/50-infra-node.conf\n' "${PROXY_SYSTEMD_DIR%/}" "$1"
 }
