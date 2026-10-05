@@ -36,24 +36,30 @@ Infra-node 是用于代理节点 VPS 的**主机基础设施层**。它提前完
 
 ## 安装
 
-从 Git 仓库：
+推荐从 [Releases](https://github.com/xpan5201/Infra-node/releases) 页面获取：
+那里的 ZIP 对应已打 tag 的版本，比跟随 `main` 稳定。
+
+从发行 ZIP：
+
+```bash
+# 先从 Releases 页面下载 Infra-node-v1.6.3.zip
+unzip Infra-node-v1.6.3.zip
+cd Infra-node-v1.6.3
+sudo bash bootstrap.sh
+```
+
+从 Git 仓库（锁定到已发布的 tag）：
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends git ca-certificates
 
-git clone --depth 1 https://github.com/xpan5201/Infra-node.git
+git clone --depth 1 --branch v1.6.3 https://github.com/xpan5201/Infra-node.git
 cd Infra-node
 sudo bash bootstrap.sh
 ```
 
-从发行 ZIP：
-
-```bash
-unzip Infra-node-v1.6.3.zip
-cd Infra-node-v1.6.3
-sudo bash bootstrap.sh
-```
+> 想跟随最新提交，把 `--branch v1.6.3` 换成 `--branch main`。
 
 > 发行包不含 `.git`，因此安装后 `repo.env` 不会记录提交 SHA，
 > `self-update` 也无法按 SHA 锁定版本。需要锁版本请用 Git 仓库并传入完整 SHA。
