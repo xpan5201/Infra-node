@@ -84,10 +84,15 @@ update_run_smoke() {
     sandbox="$(mktemp -d "${TMPDIR:-/tmp}/infra-node-smoke.XXXXXX")"; core_register_tmp "$sandbox"
     install -d -m 0755 "$sandbox/tree"; cp -a -- "$dir/." "$sandbox/tree/"
     uid="$(id -u nobody)"; gid="$(id -g nobody)"; chown -R "$uid:$gid" "$sandbox"
-    setpriv --reuid="$uid" --regid="$gid" --clear-groups --no-new-privs \
-      env -i PATH="$safe_path" HOME="$sandbox" TMPDIR="$sandbox" XDG_CONFIG_HOME="$sandbox" SHELL=/bin/bash LANG=C.UTF-8 \
-      GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null INFRA_TEST_MODE=1 "${passthrough[@]}" \
-      timeout 90 bash "$sandbox/tree/tests/smoke.sh" >"$output" 2>&1 || rc=$?
+    # Enter the sandbox *before* dropping privileges. The child inherits our working
+    # directory, and `nobody` cannot even getcwd() in a directory like /root — which is
+    # exactly where a root SSH session starts. Every find/sort in the suite then died
+    # with "Failed to restore initial working directory: /root: Permission denied",
+    # so self-update failed for anyone running it from the default root shell.
+    ( cd "$sandbox" && setpriv --reuid="$uid" --regid="$gid" --clear-groups --no-new-privs \
+        env -i PATH="$safe_path" HOME="$sandbox" TMPDIR="$sandbox" XDG_CONFIG_HOME="$sandbox" SHELL=/bin/bash LANG=C.UTF-8 \
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null INFRA_TEST_MODE=1 "${passthrough[@]}" \
+        timeout 90 bash "$sandbox/tree/tests/smoke.sh" ) >"$output" 2>&1 || rc=$?
     rm -rf -- "$sandbox"; core_unregister_tmp "$sandbox"
   else
     env -i PATH="$safe_path" HOME="${TMPDIR:-/tmp}" TMPDIR="${TMPDIR:-/tmp}" XDG_CONFIG_HOME="${TMPDIR:-/tmp}" SHELL=/bin/bash LANG=C.UTF-8 \

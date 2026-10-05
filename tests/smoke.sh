@@ -13,6 +13,11 @@
 set -Eeuo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# Own the working directory instead of inheriting the caller's. This suite is also
+# run by the install preflight as an unprivileged user, and a CWD it cannot read
+# (e.g. /root, where a root shell starts) makes every find/sort fail with
+# "Failed to restore initial working directory".
+cd -- "$ROOT"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/infra-node-smoke.XXXXXX")"
 trap 'rm -rf -- "$TMP"' EXIT
 export INFRA_TEST_MODE=1 TMPDIR="$TMP/tmp"
