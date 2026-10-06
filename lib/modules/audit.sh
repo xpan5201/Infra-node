@@ -6,6 +6,9 @@ AUDIT_ERRORS=0
 audit_ok() { printf 'OK    %s\n' "$*"; }
 audit_warn() { printf 'WARN  %s\n' "$*"; AUDIT_WARNINGS=$((AUDIT_WARNINGS+1)); }
 audit_error() { printf 'ERROR %s\n' "$*"; AUDIT_ERRORS=$((AUDIT_ERRORS+1)); }
+# Detail lines carry no severity of their own: counting each of them would inflate
+# the summary, which is meant to count findings, not the lines explaining them.
+audit_detail() { printf '      %s\n' "$*"; }
 
 # Single source of truth for the generated sysctl file. It lives in network.sh, so
 # hardcoding the path here would let status and audit disagree the moment the module
@@ -44,28 +47,36 @@ audit_run() {
   audit_file_mode "$INFRA_ETC_DIR/firewall.nft" 600
   # Honour the module-level path so the audit inspects the file that was actually written.
   local sysctl_file; sysctl_file="$(audit_sysctl_file)"
-  if [[ -r $sysctl_file ]]; then
-    # Forbidden: settings that weaken security or destabilise the host. Buffer
-    # ceilings and tcp_fastopen are deliberately NOT here — v1.6.3 sets them on
-    # purpose for proxy throughput (see the "网络调优" section of README.md).
-    if grep -Eq '(^|[.])swappiness|tcp_keepalive|tcp_ecn|tcp_tw_recycle|accept_source_route = 1|accept_redirects = 1' "$sysctl_file"; then
-      audit_error '发现禁止的高风险网络参数'
-    else
-      audit_ok '未发现高风险网络参数'
-    fi
-    # Symmetry with the firewall, which refuses to take over when UFW, firewalld
-    # or a foreign nftables chain is already present. sysctl had no such check.
-    local conflicts
-    conflicts="$(network_find_conflicts "$sysctl_file" "$(network_managed_keys "${ASSESS_PROFILE:-balanced}")")"
-    if [[ -n $conflicts ]]; then
-      audit_warn '另有文件也在设置本项目管理的网络参数（最终取值取决于文件名顺序）：'
-      while IFS= read -r line; do audit_warn "  ${line}"; done <<<"$conflicts"
-    else
-      audit_ok '没有其它 sysctl 文件争用本项目管理的参数'
-    fi
+  # Forbidden: settings that weaken security or destabilise the host. Buffer ceilings
+  # and tcp_fastopen are deliberately NOT here — v1.6.3 sets them on purpose for proxy
+  # throughput (see the "网络调优" section of README.md).
+  #
+  # Scanned across *every* applied sysctl file, not just ours. Auditing only our own
+  # file reported a clean host while another drop-in — a one-click script writing
+  # /etc/sysctl.d/999-sysctl.conf is the common case — had vm.swappiness=30 and
+  # kernel.sysrq=1 in effect. Which file carries it, and therefore whether it wins,
+  # is exactly what the operator needs to see.
+  local forbidden
+  forbidden="$(network_grep_sysctl_files \
+    '(^|[.[:space:]])swappiness|tcp_keepalive|tcp_ecn|tcp_tw_recycle|accept_source_route[[:space:]]*=[[:space:]]*1|accept_redirects[[:space:]]*=[[:space:]]*1')"
+  if [[ -n $forbidden ]]; then
+    audit_error '以下文件里存在高风险网络参数（这些是实际生效的配置）：'
+    while IFS= read -r line; do audit_detail "$line"; done <<<"$forbidden"
   else
-    audit_warn '网络配置尚未部署'
+    audit_ok '全部已应用的 sysctl 文件中都未发现高风险网络参数'
   fi
+  # Symmetry with the firewall, which refuses to take over when UFW, firewalld
+  # or a foreign nftables chain is already present. sysctl had no such check.
+  local conflicts
+  conflicts="$(network_find_conflicts "$sysctl_file" "$(network_managed_keys "${ASSESS_PROFILE:-balanced}")")"
+  if [[ -n $conflicts ]]; then
+    audit_warn '另有文件也在设置本项目管理的网络参数；字典序在后者覆盖在前者：'
+    while IFS= read -r line; do audit_detail "$line"; done <<<"$conflicts"
+    audit_detail "本项目写的是 $sysctl_file"
+  else
+    audit_ok '没有其它 sysctl 文件争用本项目管理的参数'
+  fi
+  [[ -r $sysctl_file ]] || audit_warn "网络配置尚未部署（$sysctl_file 不存在）"
   # Report drift between the running program and the configuration it generated.
   # This is the only place that surfaces "you upgraded but nothing was re-applied".
   local deployed

@@ -929,6 +929,23 @@ if [[ -n $_mem_saved ]]; then eval "$_mem_saved"; else unset -f platform_mem_mb;
 pass 'sysctl conflict scan'
 NETWORK_SYSCTL_DIR="$_saved_dir"; NETWORK_SYSCTL_CONF="$_saved_conf"
 
+# The forbidden-parameter audit must look at every applied sysctl file, not just the
+# one we write: a one-click script dropping /etc/sysctl.d/999-sysctl.conf (which sorts
+# after 99-infra-node.conf, so it wins) put vm.swappiness=30 and kernel.sysrq=1 in
+# effect while our own file stayed clean and the audit reported the host as clean.
+_saved_dir="$NETWORK_SYSCTL_DIR"; _saved_conf="$NETWORK_SYSCTL_CONF"
+NETWORK_SYSCTL_DIR="$TMP/forbid-d"; NETWORK_SYSCTL_CONF="$TMP/forbid-d/absent.conf"
+mkdir -p "$NETWORK_SYSCTL_DIR"
+printf 'vm.swappiness = 30\n# vm.swappiness = 60  (commented out, must not match)\nnet.core.somaxconn = 4096\n' \
+  >"$NETWORK_SYSCTL_DIR/999-other.conf"
+_hits="$(network_grep_sysctl_files 'swappiness')"
+[[ $_hits == *'999-other.conf'* ]] || fail "forbidden-key scan missed another drop-in: ${_hits}"
+[[ $(printf '%s\n' "$_hits" | wc -l) -eq 1 ]] || fail 'forbidden-key scan matched a commented-out line'
+[[ $(printf '%s\n' "$_hits") == *':1:'* ]] || fail 'forbidden-key scan reported the wrong line number'
+[[ -z $(network_grep_sysctl_files 'somaxconn.*=.*1$') ]] || fail 'forbidden-key scan matched an unrelated key'
+NETWORK_SYSCTL_DIR="$_saved_dir"; NETWORK_SYSCTL_CONF="$_saved_conf"
+pass 'forbidden sysctl keys are scanned across every applied file'
+
 # defaults.env: tunables must be overridable from the environment, the fixed paths
 # must not be. Getting that backwards is how INFRA_PROXY_OOM_SCORE_ADJUST became a
 # documented-but-unusable knob — plain assignment let the file overwrite the caller,

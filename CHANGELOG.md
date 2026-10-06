@@ -42,6 +42,13 @@
 
 ### Fixed
 
+- **`audit` 的高风险参数检查此前只扫本项目自己写的那个文件。** 于是它会报
+  "未发现高风险网络参数"，而实际生效的配置来自别的 drop-in —— 一键脚本常写的
+  `/etc/sysctl.d/999-sysctl.conf` 就是一例：它的字典序在 `99-infra-node.conf`
+  **之后**（`-` 的字节值小于 `9`），因此**它赢**，其中 `vm.swappiness = 30`、
+  `kernel.sysrq = 1` 都是生效的，却完全不在检查范围内。现在改为扫描
+  `/etc/sysctl.conf` 与 `/etc/sysctl.d/*.conf` 里的**所有生效行**（跳过注释行），
+  并逐条报出是哪个文件、第几行；冲突列表也不再重复计入告警条数。
 - **代理 drop-in 路径回归：`<unit>.d` 改回 `<unit>.service.d`。**
   v1.6.3 把原来的 `${unit}.d` 当成 bug"修"成了 `${unit%.service}.d`，
   理由是前者会得到 `xray.service.service.d` —— 这是**误判**：`unit` 变量本身

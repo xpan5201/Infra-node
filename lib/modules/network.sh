@@ -194,6 +194,35 @@ network_managed_keys() {
   network_build_sysctl "${1:-balanced}" | sed -n 's/^[[:space:]]*\([a-z0-9._]*\)[[:space:]]*=.*/\1/p'
 }
 
+# Every sysctl file the boot actually applies, in application order. Later files win,
+# so this is also the order in which one value overrides another.
+network_sysctl_files() {
+  local file
+  [[ -r $NETWORK_SYSCTL_CONF ]] && printf '%s\n' "$NETWORK_SYSCTL_CONF"
+  if [[ -d $NETWORK_SYSCTL_DIR ]]; then
+    while IFS= read -r file; do printf '%s\n' "$file"; done \
+      < <(find "$NETWORK_SYSCTL_DIR" -maxdepth 1 -type f -name '*.conf' 2>/dev/null | sort)
+  fi
+}
+
+# Prints "<file>:<line>: <text>" for every *effective* line of every applied sysctl
+# file matching the ERE $1. Commented-out lines are skipped: they are not in effect,
+# and matching them would turn a harmless note into a finding.
+network_grep_sysctl_files() {
+  local pattern="$1" file line n
+  while IFS= read -r file; do
+    [[ -r $file ]] || continue
+    n=0
+    while IFS= read -r line; do
+      n=$((n + 1))
+      [[ $line =~ ^[[:space:]]*# ]] && continue
+      if printf '%s\n' "$line" | grep -Eq -- "$pattern"; then
+        printf '%s:%d: %s\n' "$file" "$n" "$line"
+      fi
+    done <"$file"
+  done < <(network_sysctl_files)
+}
+
 # Other files setting keys we also manage. The firewall refuses to take over when
 # UFW, firewalld or a foreign nftables chain is already there; sysctl had no such
 # check, so two drop-ins could silently fight over the same knob with the winner
@@ -201,13 +230,7 @@ network_managed_keys() {
 # Prints "<file>: <key>" lines.
 network_find_conflicts() {
   local our_path="$1" our_keys="$2" file key line
-  local -a files=()
-  [[ -r $NETWORK_SYSCTL_CONF ]] && files+=("$NETWORK_SYSCTL_CONF")
-  if [[ -d $NETWORK_SYSCTL_DIR ]]; then
-    while IFS= read -r file; do files+=("$file"); done \
-      < <(find "$NETWORK_SYSCTL_DIR" -maxdepth 1 -type f -name '*.conf' 2>/dev/null | sort)
-  fi
-  for file in "${files[@]}"; do
+  while IFS= read -r file; do
     [[ $file == "$our_path" ]] && continue
     [[ -r $file ]] || continue
     while IFS= read -r line; do
@@ -220,7 +243,7 @@ network_find_conflicts() {
         printf '%s: %s\n' "$file" "$key"
       fi
     done <"$file"
-  done
+  done < <(network_sysctl_files)
 }
 
 network_report_conflicts() {
