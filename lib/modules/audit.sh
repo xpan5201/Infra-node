@@ -67,11 +67,18 @@ audit_run() {
   fi
   # Symmetry with the firewall, which refuses to take over when UFW, firewalld
   # or a foreign nftables chain is already present. sysctl had no such check.
-  local conflicts
+  local conflicts cfile cseen=''
   conflicts="$(network_find_conflicts "$sysctl_file" "$(network_managed_keys "${ASSESS_PROFILE:-balanced}")")"
   if [[ -n $conflicts ]]; then
-    audit_warn '另有文件也在设置本项目管理的网络参数；字典序在后者覆盖在前者：'
-    while IFS= read -r line; do audit_detail "$line"; done <<<"$conflicts"
+    audit_warn '另有文件也在设置本项目管理的网络参数：'
+    while IFS= read -r line; do
+      cfile="${line%%:*}"
+      if [[ $cseen != *"|${cfile}|"* ]]; then
+        cseen="${cseen}|${cfile}|"
+        audit_detail "${cfile} —— $(network_sysctl_order_note "$cfile" "$sysctl_file")"
+      fi
+      audit_detail "    ${line#*: }"
+    done <<<"$conflicts"
     audit_detail "本项目写的是 $sysctl_file"
   else
     audit_ok '没有其它 sysctl 文件争用本项目管理的参数'

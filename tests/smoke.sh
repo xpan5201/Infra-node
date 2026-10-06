@@ -898,17 +898,34 @@ pass 'proxy OOM score is configurable'
 
 # Symmetry with the firewall, which refuses to take over when UFW, firewalld or a
 # foreign nftables chain is present. sysctl had no equivalent check.
-_saved_dir="$NETWORK_SYSCTL_DIR"; _saved_conf="$NETWORK_SYSCTL_CONF"
-NETWORK_SYSCTL_DIR="$TMP/sysctl-d"; NETWORK_SYSCTL_CONF="$TMP/sysctl-d/absent.conf"
-mkdir -p "$NETWORK_SYSCTL_DIR"
-printf 'net.core.somaxconn = 1\n# a comment\nunrelated.key = 2\n' >"$NETWORK_SYSCTL_DIR/50-someone-else.conf"
-printf 'net.core.somaxconn = 3\n' >"$NETWORK_SYSCTL_DIR/99-infra-node.conf"
-_conf="$(network_find_conflicts "$NETWORK_SYSCTL_DIR/99-infra-node.conf" "$(printf 'net.core.somaxconn\n')")"
+_saved_dirs=("${NETWORK_SYSCTL_DIRS[@]}")
+NETWORK_SYSCTL_DIRS=("$TMP/sysctl-d")
+mkdir -p "$TMP/sysctl-d"
+printf 'net.core.somaxconn = 1\n# a comment\nunrelated.key = 2\n' >"$TMP/sysctl-d/50-someone-else.conf"
+printf 'net.core.somaxconn = 3\n' >"$TMP/sysctl-d/99-infra-node.conf"
+_conf="$(network_find_conflicts "$TMP/sysctl-d/99-infra-node.conf" "$(printf 'net.core.somaxconn\n')")"
 [[ $_conf == *'50-someone-else.conf: net.core.somaxconn'* ]] || fail "conflict scan missed an overlap: ${_conf}"
 [[ $_conf != *'99-infra-node.conf'* ]] || fail 'conflict scan reported our own file'
 [[ $_conf != *'unrelated.key'* ]] || fail 'conflict scan reported a key we do not manage'
-_conf="$(network_find_conflicts "$NETWORK_SYSCTL_DIR/99-infra-node.conf" "$(printf 'unrelated.key\n')")"
+_conf="$(network_find_conflicts "$TMP/sysctl-d/99-infra-node.conf" "$(printf 'unrelated.key\n')")"
 [[ $_conf != *'somaxconn'* ]] || fail 'conflict scan ignored the managed-key list'
+# Ordering must follow systemd's rules, not a directory listing: files are ranked by
+# *filename* across all directories, so 99-sysctl.conf comes after 99-infra-node.conf
+# ('s' > 'i') — which is exactly how a distribution's /etc/sysctl.conf override wins —
+# while 50-someone-else.conf comes before it and therefore loses.
+printf 'net.core.somaxconn = 9\n' >"$TMP/sysctl-d/99-sysctl.conf"
+[[ $(network_sysctl_rank "$TMP/sysctl-d/99-sysctl.conf") -gt $(network_sysctl_rank "$TMP/sysctl-d/99-infra-node.conf") ]] \
+  || fail '99-sysctl.conf must outrank 99-infra-node.conf'
+[[ $(network_sysctl_rank "$TMP/sysctl-d/50-someone-else.conf") -lt $(network_sysctl_rank "$TMP/sysctl-d/99-infra-node.conf") ]] \
+  || fail '50-someone-else.conf must rank before 99-infra-node.conf'
+[[ $(network_sysctl_order_note "$TMP/sysctl-d/99-sysctl.conf" "$TMP/sysctl-d/99-infra-node.conf") == *'它覆盖本项目'* ]] \
+  || fail 'ordering note did not report the later file as the winner'
+[[ $(network_sysctl_order_note "$TMP/sysctl-d/50-someone-else.conf" "$TMP/sysctl-d/99-infra-node.conf") == *'本项目覆盖它'* ]] \
+  || fail 'ordering note did not report the earlier file as losing'
+# A file systemd never reads must not be reported as a conflict at all — /etc/sysctl.conf
+# is only applied when a distribution symlinks it into one of the searched directories.
+[[ -z $(network_sysctl_files | grep -Fx "$TMP/sysctl-d/not-applied.conf") ]] \
+  || fail 'an unapplied file leaked into the enumeration'
 # network_managed_keys must list the keys we actually write, but a naive call is
 # host-dependent in two ways: an earlier test unsets platform_mem_mb, and a Windows
 # Git-Bash has no /proc/sys at all — so every key would be filtered out as
@@ -927,23 +944,22 @@ if [[ -n $_mem_saved ]]; then eval "$_mem_saved"; else unset -f platform_mem_mb;
 [[ $_keys == *'net.core.somaxconn'* ]] || fail "network_managed_keys missed a key we write: ${_keys}"
 [[ $_keys != *'='* ]] || fail 'network_managed_keys returned whole lines instead of key names'
 pass 'sysctl conflict scan'
-NETWORK_SYSCTL_DIR="$_saved_dir"; NETWORK_SYSCTL_CONF="$_saved_conf"
+NETWORK_SYSCTL_DIRS=("${_saved_dirs[@]}")
 
 # The forbidden-parameter audit must look at every applied sysctl file, not just the
-# one we write: a one-click script dropping /etc/sysctl.d/999-sysctl.conf (which sorts
-# after 99-infra-node.conf, so it wins) put vm.swappiness=30 and kernel.sysrq=1 in
-# effect while our own file stayed clean and the audit reported the host as clean.
-_saved_dir="$NETWORK_SYSCTL_DIR"; _saved_conf="$NETWORK_SYSCTL_CONF"
-NETWORK_SYSCTL_DIR="$TMP/forbid-d"; NETWORK_SYSCTL_CONF="$TMP/forbid-d/absent.conf"
-mkdir -p "$NETWORK_SYSCTL_DIR"
+# one we write: a one-click script dropping /etc/sysctl.d/999-sysctl.conf (which ranks
+# after 99-infra-node.conf, so it wins) put vm.swappiness=30 in effect while our own
+# file stayed clean and the audit reported the host as clean.
+NETWORK_SYSCTL_DIRS=("$TMP/forbid-d")
+mkdir -p "$TMP/forbid-d"
 printf 'vm.swappiness = 30\n# vm.swappiness = 60  (commented out, must not match)\nnet.core.somaxconn = 4096\n' \
-  >"$NETWORK_SYSCTL_DIR/999-other.conf"
+  >"$TMP/forbid-d/999-other.conf"
 _hits="$(network_grep_sysctl_files 'swappiness')"
 [[ $_hits == *'999-other.conf'* ]] || fail "forbidden-key scan missed another drop-in: ${_hits}"
 [[ $(printf '%s\n' "$_hits" | wc -l) -eq 1 ]] || fail 'forbidden-key scan matched a commented-out line'
 [[ $(printf '%s\n' "$_hits") == *':1:'* ]] || fail 'forbidden-key scan reported the wrong line number'
 [[ -z $(network_grep_sysctl_files 'somaxconn.*=.*1$') ]] || fail 'forbidden-key scan matched an unrelated key'
-NETWORK_SYSCTL_DIR="$_saved_dir"; NETWORK_SYSCTL_CONF="$_saved_conf"
+NETWORK_SYSCTL_DIRS=("${_saved_dirs[@]}")
 pass 'forbidden sysctl keys are scanned across every applied file'
 
 # defaults.env: tunables must be overridable from the environment, the fixed paths

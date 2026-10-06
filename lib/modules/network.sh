@@ -9,10 +9,16 @@ NETWORK_FSTAB_PATH=/etc/fstab
 NETWORK_PROC_SYS=/proc/sys
 # Test seam: where the BBR module-load persistence file goes.
 NETWORK_MODULES_LOAD_DIR=/etc/modules-load.d
-# Where the conflict scan looks for other sysctl drop-ins, and the file that holds
-# the project's own settings (never reported as a conflict with itself).
-NETWORK_SYSCTL_DIR=/etc/sysctl.d
-NETWORK_SYSCTL_CONF=/etc/sysctl.conf
+# The directories systemd-sysctl reads, in descending priority. Verified against the
+# binary itself on Debian 13 — `strings /usr/lib/systemd/systemd-sysctl` contains
+# exactly these four paths and no others, and `systemd-sysctl --cat-config` lists
+# files from these directories only.
+#
+# /etc/sysctl.conf is deliberately NOT here: systemd never opens it directly. It is
+# only in effect when a distribution symlinks it in (the classic
+# /etc/sysctl.d/99-sysctl.conf -> ../sysctl.conf), which is why this walks symlinks
+# instead of using `find -type f` — that would miss precisely the link that matters.
+NETWORK_SYSCTL_DIRS=(/etc/sysctl.d /run/sysctl.d /usr/local/lib/sysctl.d /usr/lib/sysctl.d)
 # Free space left over after creating a swap file. A swap file that fills the disk
 # is worse than no swap at all.
 NETWORK_SWAP_SPACE_HEADROOM_MB=256
@@ -194,14 +200,46 @@ network_managed_keys() {
   network_build_sysctl "${1:-balanced}" | sed -n 's/^[[:space:]]*\([a-z0-9._]*\)[[:space:]]*=.*/\1/p'
 }
 
-# Every sysctl file the boot actually applies, in application order. Later files win,
-# so this is also the order in which one value overrides another.
+# Every sysctl file systemd applies, in application order. Files are ordered by
+# *filename* across all directories — not by directory — so a symlink's name (not its
+# target, and not where it lives) decides its rank, and later files override earlier
+# ones. When the same filename exists in more than one directory the highest-priority
+# directory wins, which is what the stable sort plus the first-wins de-duplication
+# reproduces.
 network_sysctl_files() {
-  local file
-  [[ -r $NETWORK_SYSCTL_CONF ]] && printf '%s\n' "$NETWORK_SYSCTL_CONF"
-  if [[ -d $NETWORK_SYSCTL_DIR ]]; then
-    while IFS= read -r file; do printf '%s\n' "$file"; done \
-      < <(find "$NETWORK_SYSCTL_DIR" -maxdepth 1 -type f -name '*.conf' 2>/dev/null | sort)
+  local dir f
+  for dir in "${NETWORK_SYSCTL_DIRS[@]}"; do
+    [[ -d $dir ]] || continue
+    for f in "$dir"/*.conf; do
+      [[ -r $f ]] || continue
+      printf '%s\t%s\n' "${f##*/}" "$f"
+    done
+  done | sort -k1,1 -s | awk -F'\t' '!seen[$1]++ { print $2 }'
+}
+
+# 1-based position of $1 in application order; non-zero when it is not applied at all.
+network_sysctl_rank() {
+  local target="$1" f n=0
+  while IFS= read -r f; do
+    n=$((n + 1))
+    if [[ $f == "$target" ]]; then printf '%s\n' "$n"; return 0; fi
+  done < <(network_sysctl_files)
+  return 1
+}
+
+# Human-readable ordering verdict for $1 relative to $2 (both sysctl files).
+network_sysctl_order_note() {
+  local other="$1" ours="$2" r_other r_ours
+  r_other="$(network_sysctl_rank "$other" || true)"
+  r_ours="$(network_sysctl_rank "$ours" || true)"
+  if [[ -z $r_other ]]; then
+    printf '%s\n' 'systemd 不会读取它（不在 systemd 的搜索目录里），可以忽略'
+  elif [[ -z $r_ours ]]; then
+    printf '%s\n' '本项目尚未部署，无排序可言'
+  elif ((r_other > r_ours)); then
+    printf '第 %d 位 vs 本项目第 %d 位，重启后它覆盖本项目\n' "$r_other" "$r_ours"
+  else
+    printf '第 %d 位 vs 本项目第 %d 位，重启后本项目覆盖它\n' "$r_other" "$r_ours"
   fi
 }
 
@@ -247,12 +285,21 @@ network_find_conflicts() {
 }
 
 network_report_conflicts() {
-  local our_path="$1" profile="${2:-balanced}" conflicts
+  local our_path="$1" profile="${2:-balanced}" conflicts file seen=''
   conflicts="$(network_find_conflicts "$our_path" "$(network_managed_keys "$profile")")"
   [[ -n $conflicts ]] || return 0
-  ui_warn '以下文件也在设置本项目管理的网络参数，最终取值取决于文件名顺序：'
-  while IFS= read -r line; do ui_warn "  ${line}"; done <<<"$conflicts"
-  ui_warn "本项目写的是 ${our_path}；如需以本项目为准，请先与对方文件明确分工。"
+  ui_warn '以下文件也在设置本项目管理的网络参数：'
+  # One ordering verdict per file, then the keys it overlaps on — the verdict is a
+  # property of the file, not of each key.
+  while IFS= read -r line; do
+    file="${line%%:*}"
+    if [[ $seen != *"|${file}|"* ]]; then
+      seen="${seen}|${file}|"
+      ui_warn "  ${file} —— $(network_sysctl_order_note "$file" "$our_path")"
+    fi
+    ui_warn "      ${line#*: }"
+  done <<<"$conflicts"
+  ui_warn "本项目写的是 ${our_path}。"
 }
 
 network_report_bbr_state() {

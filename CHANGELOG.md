@@ -42,6 +42,14 @@
 
 ### Fixed
 
+- **sysctl 文件枚举此前不符合 systemd 的真实行为。** 它把裸 `/etc/sysctl.conf` 当成
+  生效文件、还列在最前；而 `systemd-sysctl` 的搜索目录只有 `/etc/sysctl.d`、
+  `/run/sysctl.d`、`/usr/local/lib/sysctl.d`、`/usr/lib/sysctl.d`（在 Debian 13 上用
+  二进制内的路径字符串与 `--cat-config` 实测），**它从不直接读 `/etc/sysctl.conf`** ——
+  那只有在发行版把它符号链接进上述目录时才生效；而原来的 `find -type f` 恰好会漏掉
+  那个符号链接。现在按 systemd 的规则来：按**文件名**全局排序（与所在目录无关，
+  同名的取高优先级目录），并跟随符号链接。报告改为直接说出谁覆盖谁，取代原先含糊的
+  "取决于文件名顺序"；systemd 根本不会读的文件会被明确标注为可忽略。
 - **`audit` 的高风险参数检查此前只扫本项目自己写的那个文件。** 于是它会报
   "未发现高风险网络参数"，而实际生效的配置来自别的 drop-in —— 一键脚本常写的
   `/etc/sysctl.d/999-sysctl.conf` 就是一例：它的字典序在 `99-infra-node.conf`
